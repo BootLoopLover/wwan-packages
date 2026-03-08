@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=xray-core
-PKG_VERSION:=25.12.2-stdrx
+PKG_VERSION:=26.2.6-stdrx
 PKG_RELEASE:=1
 
 PKG_MAINTAINER:=Paka <you@example.com>
@@ -21,7 +21,7 @@ define Package/xray-core
 endef
 
 define Package/xray-core/description
-Custom Xray-core build (version 25.10.15-stdrx) by @STDSTRX.
+Custom Xray-core build (version 26.2.6-stdrx) by @STDSTRX.
 This package installs a prebuilt Xray binary, init script, and config files.
 endef
 
