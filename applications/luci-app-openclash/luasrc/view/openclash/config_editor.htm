@@ -5,14 +5,11 @@
 		line-height: 150%;
 		resize: both !important;
 	}
+	.CodeMirror-merge {
+		border: none !important;
+	}
 	.CodeMirror-merge-r-chunk {
     	background: #0095ff2e !important;
-	}
-	.CodeMirror-merge-r-chunk-end {
-    	border-bottom: unset !important;
-	}
-	.CodeMirror-merge-r-chunk-start {
-    	border-top: unset !important;
 	}
 	.CodeMirror-merge-2pane .CodeMirror-merge-gap {
 		height: 700px !important;
@@ -24,7 +21,17 @@
 	.CodeMirror-vscrollbar-oc {
 		display: none !important;
 	}
-
+	.CodeMirror, .CodeMirror-line {
+		width: 100% !important;
+		max-width: 100% !important;
+		min-width: 0 !important;
+		box-sizing: border-box;
+		word-break: break-all !important;
+		overflow-wrap: break-word !important;
+	}
+	:root[data-darkmode="true"] .CodeMirror-merge-gap {
+		background: #d0cfcf !important;
+	}
 </style>
 <link rel="stylesheet" href="/luci-static/resources/openclash/lib/codemirror.css"/>
 <link rel="stylesheet" href="/luci-static/resources/openclash/theme/material.css"/>
@@ -62,7 +69,7 @@
 <%-
 local uci = require("luci.model.uci").cursor()
 local fs = require "luci.openclash"
-local conf = uci:get("openclash", "config", "config_path")
+local conf = fs.uci_get_config("config", "config_path")
 if not conf then conf = "/etc/openclash/config/config.yaml" end
 local conf_name = fs.basename(conf)
 if not conf_name then conf_name = "config.yaml"  end
@@ -90,6 +97,17 @@ local sconf = "/etc/openclash/"..conf_name
 <script type="text/javascript">//<![CDATA[
 
 function isDarkBackground(element) {
+	var cachedTheme = localStorage.getItem('oc-theme');
+	if (cachedTheme === 'dark') {
+		return true;
+	} else if (cachedTheme === 'light') {
+		return false;
+	}
+
+	if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+		return true;
+	}
+
 	var style = window.getComputedStyle(element);
 	var bgColor = style.backgroundColor;
 	let r, g, b;
@@ -386,6 +404,7 @@ var myEditor_fake_filter = document.getElementById("cbid.openclash.config.custom
 var myEditor_custom_domain_dns = document.getElementById("cbid.openclash.config.custom_domain_dns");
 var myEditor_edit_file = document.getElementById("cbid.openclash.config.edit_file");
 var myEditor_custom_sniffer = document.getElementById("cbid.openclash.config.sniffer_custom");
+var myEditor_proxy_name_pol = document.getElementById("cbid.openclash.config.custom_proxy_server_dns_policy");
 
 if (myEditor_hosts) {
 	editor(myEditor_hosts, 'false', '100%', '300px');
@@ -401,6 +420,10 @@ if (myEditor_fall_fil) {
 
 if (myEditor_name_pol) {
 	editor(myEditor_name_pol, 'false', '100%', '300px');
+};
+
+if (myEditor_proxy_name_pol) {
+	editor(myEditor_proxy_name_pol, 'false', '100%', '300px');
 };
 
 if (myEditor_name_cus_r1) {
@@ -469,6 +492,7 @@ if (core_log && oc_log) {
 	if (isDarkBackground(document.body)) {
 		core_editor.setOption('theme', 'material-log');
 		oc_editor.setOption('theme', 'material-log');
+		document.documentElement.setAttribute('data-darkmode', 'true');
 	};
 };
 

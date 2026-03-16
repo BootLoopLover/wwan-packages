@@ -1,27 +1,36 @@
 local m, s = ...
 
-local api = require "luci.passwall.api"
-
 local singbox_bin = api.finded_com("sing-box")
 
 if not singbox_bin then
 	return
 end
 
-local local_version = api.get_app_version("sing-box")
-local version_ge_1_12_0 = api.compare_versions(local_version:match("[^v]+"), ">=", "1.12.0")
+type_name = "sing-box"
 
-local singbox_tags = luci.sys.exec(singbox_bin .. " version  | grep 'Tags:' | awk '{print $2}'")
+-- [[ sing-box ]]
 
-local appname = "passwall"
+s.fields["type"]:value(type_name, "Sing-Box")
+if not s.fields["type"].default then
+	s.fields["type"].default = type_name
+end
 
-local type_name = "sing-box"
+if s.val["type"] ~= type_name then
+	return
+end
 
 local option_prefix = "singbox_"
 
 local function _n(name)
 	return option_prefix .. name
 end
+
+local formvalue_key = "cbid." .. appname .. "." .. arg[1] .. "."
+local formvalue_proto = luci.http.formvalue(formvalue_key .. _n("protocol"))
+
+if formvalue_proto then s.val["protocol"] = formvalue_proto end
+
+local arg_select_proto = luci.http.formvalue("select_proto") or ""
 
 local ss_method_new_list = {
 	"none", "aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"
@@ -33,17 +42,12 @@ local ss_method_old_list = {
 
 local security_list = { "none", "auto", "aes-128-gcm", "chacha20-poly1305", "zero" }
 
--- [[ sing-box ]]
-
-s.fields["type"]:value(type_name, "Sing-Box")
+local singbox_tags = luci.sys.exec(singbox_bin .. " version  | grep 'Tags:' | awk '{print $2}'")
 
 o = s:option(ListValue, _n("protocol"), translate("Protocol"))
 o:value("socks", "Socks")
 o:value("http", "HTTP")
 o:value("shadowsocks", "Shadowsocks")
-if singbox_tags:find("with_shadowsocksr") then
-	o:value("shadowsocksr", "ShadowsocksR")
-end
 o:value("vmess", "Vmess")
 o:value("trojan", "Trojan")
 if singbox_tags:find("with_wireguard") then
@@ -59,173 +63,141 @@ end
 if singbox_tags:find("with_quic") then
 	o:value("hysteria2", "Hysteria2")
 end
-if version_ge_1_12_0 then
-	o:value("anytls", "AnyTLS")
-end
+o:value("anytls", "AnyTLS")
+o:value("ssh", "SSH")
 o:value("_urltest", translate("URLTest"))
 o:value("_shunt", translate("Shunt"))
 o:value("_iface", translate("Custom Interface"))
-
-o = s:option(Value, _n("iface"), translate("Interface"))
-o.default = "eth1"
-o:depends({ [_n("protocol")] = "_iface" })
-
-local nodes_table = {}
-local iface_table = {}
-local urltest_table = {}
-for k, e in ipairs(api.get_valid_nodes()) do
-	if e.node_type == "normal" then
-		nodes_table[#nodes_table + 1] = {
-			id = e[".name"],
-			remark = e["remark"],
-			type = e["type"]
-		}
-	end
-	if e.protocol == "_iface" then
-		iface_table[#iface_table + 1] = {
-			id = e[".name"],
-			remark = e["remark"]
-		}
-	end
-	if e.protocol == "_urltest" then
-		urltest_table[#urltest_table + 1] = {
-			id = e[".name"],
-			remark = e["remark"]
-		}
+function o.custom_cfgvalue(self, section)
+	if arg_select_proto ~= "" then
+		return arg_select_proto
+	else
+		return m:get(section, self.option:sub(1 + #option_prefix))
 	end
 end
 
-local socks_list = {}
-m.uci:foreach(appname, "socks", function(s)
-	if s.enabled == "1" and s.node then
-		socks_list[#socks_list + 1] = {
-			id = "Socks_" .. s[".name"],
-			remark = translate("Socks Config") .. " " .. string.format("[%s %s]", s.port, translate("Port"))
-		}
-	end
-end)
-
---[[ URLTest ]]
-o = s:option(DynamicList, _n("urltest_node"), translate("URLTest node list"), translate("List of nodes to test, <a target='_blank' href='https://sing-box.sagernet.org/configuration/outbound/urltest'>document</a>"))
-o:depends({ [_n("protocol")] = "_urltest" })
-for k, v in pairs(nodes_table) do o:value(v.id, v.remark) end
-
-o = s:option(Value, _n("urltest_url"), translate("Probe URL"))
-o:depends({ [_n("protocol")] = "_urltest" })
-o:value("https://cp.cloudflare.com/", "Cloudflare")
-o:value("https://www.gstatic.com/generate_204", "Gstatic")
-o:value("https://www.google.com/generate_204", "Google")
-o:value("https://www.youtube.com/generate_204", "YouTube")
-o:value("https://connect.rom.miui.com/generate_204", "MIUI (CN)")
-o:value("https://connectivitycheck.platform.hicloud.com/generate_204", "HiCloud (CN)")
-o.default = "https://www.gstatic.com/generate_204"
-o.description = translate("The URL used to detect the connection status.")
-
-o = s:option(Value, _n("urltest_interval"), translate("Test interval"))
-o:depends({ [_n("protocol")] = "_urltest" })
-o.datatype = "uinteger"
-o.default = "180"
-o.description = translate("The test interval in seconds.") .. "<br />" ..
-		translate("Test interval must be less or equal than idle timeout.")
-
-o = s:option(Value, _n("urltest_tolerance"), translate("Test tolerance"), translate("The test tolerance in milliseconds."))
-o:depends({ [_n("protocol")] = "_urltest" })
-o.datatype = "uinteger"
-o.default = "50"
-
-o = s:option(Value, _n("urltest_idle_timeout"), translate("Idle timeout"), translate("The idle timeout in seconds."))
-o:depends({ [_n("protocol")] = "_urltest" })
-o.datatype = "uinteger"
-o.default = "1800"
-
-o = s:option(Flag, _n("urltest_interrupt_exist_connections"), translate("Interrupt existing connections"))
-o:depends({ [_n("protocol")] = "_urltest" })
-o.default = "0"
-o.description = translate("Interrupt existing connections when the selected outbound has changed.")
-
--- [[ 分流模块 ]]
-if #nodes_table > 0 then
-	o = s:option(Flag, _n("preproxy_enabled"), translate("Preproxy"))
-	o:depends({ [_n("protocol")] = "_shunt" })
-
-	o = s:option(ListValue, _n("main_node"), string.format('<a style="color:red">%s</a>', translate("Preproxy Node")), translate("Set the node to be used as a pre-proxy. Each rule (including <code>Default</code>) has a separate switch that controls whether this rule uses the pre-proxy or not."))
-	o:depends({ [_n("protocol")] = "_shunt", [_n("preproxy_enabled")] = true })
-	for k, v in pairs(socks_list) do
-		o:value(v.id, v.remark)
-	end
-	for k, v in pairs(urltest_table) do
-		o:value(v.id, v.remark)
-	end
-	for k, v in pairs(iface_table) do
-		o:value(v.id, v.remark)
-	end
-	for k, v in pairs(nodes_table) do
-		o:value(v.id, v.remark)
-	end
+local load_urltest_options = s.val["protocol"] == "_urltest" or arg_select_proto == "_urltest"
+local load_shunt_options = s.val["protocol"] == "_shunt" or arg_select_proto == "_shunt"
+local load_iface_options = s.val["protocol"] == "_iface" or arg_select_proto == "_iface"
+local load_normal_options = true
+if load_urltest_options or load_shunt_options or load_iface_options then
+	load_normal_options = nil
 end
-m.uci:foreach(appname, "shunt_rules", function(e)
-	if e[".name"] and e.remarks then
-		o = s:option(ListValue, _n(e[".name"]), string.format('* <a href="%s" target="_blank">%s</a>', api.url("shunt_rules", e[".name"]), e.remarks))
-		o:value("", translate("Close"))
-		o:value("_default", translate("Default"))
-		o:value("_direct", translate("Direct Connection"))
-		o:value("_blackhole", translate("Blackhole"))
-		o:depends({ [_n("protocol")] = "_shunt" })
+if not arg_select_proto:find("_") then
+	load_normal_options = true
+end
 
-		if #nodes_table > 0 then
-			for k, v in pairs(socks_list) do
+local node_list = api.get_node_list()
+
+if load_urltest_options then -- [[ URLTest Start ]]
+	o = s:option(ListValue, _n("node_add_mode"), translate("Node Addition Method"))
+	o:depends({ [_n("protocol")] = "_urltest" })
+	o.default = "manual"
+	o:value("manual", translate("Manual"))
+	o:value("batch", translate("Batch"))
+
+	o = s:option(MultiValue, _n("urltest_node"), translate("URLTest node list"), translate("List of nodes to test, <a target='_blank' href='https://sing-box.sagernet.org/configuration/outbound/urltest'>document</a>"))
+	o:depends({ [_n("node_add_mode")] = "manual" })
+	o.widget = "checkbox"
+	o.template = appname .. "/cbi/nodes_multivalue"
+	o.group = {}
+	for k1, v1 in pairs(node_list) do
+		if k1 == "socks_list" or k1 == "normal_list" then
+			for i, v in ipairs(v1) do
 				o:value(v.id, v.remark)
-			end
-			for k, v in pairs(urltest_table) do
-				o:value(v.id, v.remark)
-			end
-			for k, v in pairs(iface_table) do
-				o:value(v.id, v.remark)
-			end
-			local pt = s:option(ListValue, _n(e[".name"] .. "_proxy_tag"), string.format('* <a style="color:red">%s</a>', e.remarks .. " " .. translate("Preproxy")))
-			pt:value("", translate("Close"))
-			pt:value("main", translate("Preproxy Node"))
-			for k, v in pairs(nodes_table) do
-				o:value(v.id, v.remark)
-				pt:depends({ [_n("protocol")] = "_shunt", [_n("preproxy_enabled")] = true, [_n(e[".name"])] = v.id })
+				o.group[#o.group+1] = v.group or ""
 			end
 		end
 	end
-end)
+	-- 读取旧 DynamicList
+	function o.cfgvalue(self, section)
+		return m.uci:get_list(appname, section, "urltest_node") or {}
+	end
+	-- 写入保持 DynamicList
+	function o.custom_write(self, section, value)
+		local old = m.uci:get_list(appname, section, "urltest_node") or {}
+		local new, set = {}, {}
+		for v in value:gmatch("%S+") do
+			new[#new + 1] = v
+			set[v] = 1
+		end
+		for _, v in ipairs(old) do
+			if not set[v] then
+				m.uci:set_list(appname, section, "urltest_node", new)
+				return
+			end
+			set[v] = nil
+		end
+		for _ in pairs(set) do
+			m.uci:set_list(appname, section, "urltest_node", new)
+			return
+		end
+	end
 
-o = s:option(DummyValue, _n("shunt_tips"), "　")
-o.not_rewrite = true
-o.rawhtml = true
-o.cfgvalue = function(t, n)
-	return string.format('<a style="color: red" href="../rule">%s</a>', translate("No shunt rules? Click me to go to add."))
+	o = s:option(MultiValue, _n("node_group"), translate("Select Group"))
+	o:depends({ [_n("node_add_mode")] = "batch" })
+	o.widget = "checkbox"
+	o:value("default", translate("default"))
+	for k, v in pairs(groups) do
+		o:value(api.UrlEncode(k), k)
+	end
+
+	o = s:option(Value, _n("node_match_rule"), translate("Node Matching Rules"))
+	o:depends({ [_n("node_add_mode")] = "batch" })
+	local descrStr = "Example: <code>^A && B && !C && D$</code><br>"
+	descrStr = descrStr .. "This means the node remark must start with A (^), include B, exclude C (!), and end with D ($).<br>"
+	descrStr = descrStr .. "Conditions are joined by <code>&&</code>, and their order does not affect the result."
+	o.description = translate(descrStr) .. string.format("<br><font color='red'>%s</font>",
+			translate("Keep the match scope small. Too many nodes can impact router performance."))
+
+	o = s:option(Value, _n("urltest_url"), translate("Probe URL"))
+	o:depends({ [_n("protocol")] = "_urltest" })
+	o:value("https://cp.cloudflare.com/", "Cloudflare")
+	o:value("https://www.gstatic.com/generate_204", "Gstatic")
+	o:value("https://www.google.com/generate_204", "Google")
+	o:value("https://www.youtube.com/generate_204", "YouTube")
+	o:value("https://connect.rom.miui.com/generate_204", "MIUI (CN)")
+	o:value("https://connectivitycheck.platform.hicloud.com/generate_204", "HiCloud (CN)")
+	o.default = o.keylist[3]
+	o.description = translate("The URL used to detect the connection status.")
+
+	o = s:option(Value, _n("urltest_interval"), translate("Test interval"))
+	o:depends({ [_n("protocol")] = "_urltest" })
+	o.default = "3m"
+	o.placeholder = "3m"
+	o.description = translate("The interval between initiating probes.") .. "<br>" ..
+			translate("The time format is numbers + units, such as '10s', '2h45m', and the supported time units are <code>s</code>, <code>m</code>, <code>h</code>, which correspond to seconds, minutes, and hours, respectively.") .. "<br>" ..
+			translate("When the unit is not filled in, it defaults to seconds.") .. "<br>" ..
+			translate("Test interval must be less or equal than idle timeout.")
+
+	o = s:option(Value, _n("urltest_tolerance"), translate("Test tolerance"), translate("The test tolerance in milliseconds."))
+	o:depends({ [_n("protocol")] = "_urltest" })
+	o.datatype = "uinteger"
+	o.placeholder = "50"
+	o.default = "50"
+
+	o = s:option(Value, _n("urltest_idle_timeout"), translate("Idle timeout"))
+	o:depends({ [_n("protocol")] = "_urltest" })
+	o.placeholder = "30m"
+	o.default = "30m"
+	o.description = translate("The idle timeout.") .. "<br>" ..
+			translate("The time format is numbers + units, such as '10s', '2h45m', and the supported time units are <code>s</code>, <code>m</code>, <code>h</code>, which correspond to seconds, minutes, and hours, respectively.") .. "<br>" ..
+			translate("When the unit is not filled in, it defaults to seconds.")
+
+	o = s:option(Flag, _n("urltest_interrupt_exist_connections"), translate("Interrupt existing connections"))
+	o:depends({ [_n("protocol")] = "_urltest" })
+	o.default = "0"
+	o.description = translate("Interrupt existing connections when the selected outbound has changed.") 
+end -- [[ URLTest End ]]
+
+if load_iface_options then -- [[ 自定义接口 Start ]]
+	o = s:option(Value, _n("iface"), translate("Interface"))
+	o.default = "eth1"
+	o:depends({ [_n("protocol")] = "_iface" })
 end
-o:depends({ [_n("protocol")] = "_shunt" })
 
-local o = s:option(ListValue, _n("default_node"), string.format('* <a style="color:red">%s</a>', translate("Default")))
-o:depends({ [_n("protocol")] = "_shunt" })
-o:value("_direct", translate("Direct Connection"))
-o:value("_blackhole", translate("Blackhole"))
 
-if #nodes_table > 0 then
-	for k, v in pairs(socks_list) do
-		o:value(v.id, v.remark)
-	end
-	for k, v in pairs(urltest_table) do
-		o:value(v.id, v.remark)
-	end
-	for k, v in pairs(iface_table) do
-		o:value(v.id, v.remark)
-	end
-	local dpt = s:option(ListValue, _n("default_proxy_tag"), string.format('* <a style="color:red">%s</a>', translate("Default Preproxy")), translate("When using, localhost will connect this node first and then use this node to connect the default node."))
-	dpt:value("", translate("Close"))
-	dpt:value("main", translate("Preproxy Node"))
-	for k, v in pairs(nodes_table) do
-		o:value(v.id, v.remark)
-		dpt:depends({ [_n("protocol")] = "_shunt", [_n("preproxy_enabled")] = true, [_n("default_node")] = v.id })
-	end
-end
-
--- [[ 分流模块 End ]]
+if load_normal_options then
 
 o = s:option(Value, _n("address"), translate("Address (Support Domain Name)"))
 
@@ -235,26 +207,33 @@ o.datatype = "port"
 local protocols = s.fields[_n("protocol")].keylist
 if #protocols > 0 then
 	for index, value in ipairs(protocols) do
-		if not value:find("_") then
+		if not value:find("^_") then
 			s.fields[_n("address")]:depends({ [_n("protocol")] = value })
 			s.fields[_n("port")]:depends({ [_n("protocol")] = value })
 		end
 	end
 end
 
+o = s:option(Value, _n("uuid"), translate("ID"))
+o.password = true
+o:depends({ [_n("protocol")] = "vmess" })
+o:depends({ [_n("protocol")] = "vless" })
+o:depends({ [_n("protocol")] = "tuic" })
+
 o = s:option(Value, _n("username"), translate("Username"))
 o:depends({ [_n("protocol")] = "http" })
 o:depends({ [_n("protocol")] = "socks" })
+o:depends({ [_n("protocol")] = "ssh" })
 
 o = s:option(Value, _n("password"), translate("Password"))
 o.password = true
 o:depends({ [_n("protocol")] = "http" })
 o:depends({ [_n("protocol")] = "socks" })
 o:depends({ [_n("protocol")] = "shadowsocks" })
-o:depends({ [_n("protocol")] = "shadowsocksr" })
 o:depends({ [_n("protocol")] = "trojan" })
 o:depends({ [_n("protocol")] = "tuic" })
 o:depends({ [_n("protocol")] = "anytls" })
+o:depends({ [_n("protocol")] = "ssh" })
 
 o = s:option(ListValue, _n("security"), translate("Encrypt Method"))
 for a, t in ipairs(security_list) do o:value(t) end
@@ -266,48 +245,9 @@ for a, t in ipairs(ss_method_new_list) do o:value(t) end
 for a, t in ipairs(ss_method_old_list) do o:value(t) end
 o:depends({ [_n("protocol")] = "shadowsocks" })
 
-if singbox_tags:find("with_shadowsocksr") then
-	o = s:option(ListValue, _n("ssr_method"), translate("Encrypt Method"))
-	o.rewrite_option = "method"
-	for a, t in ipairs(ss_method_old_list) do o:value(t) end
-	o:depends({ [_n("protocol")] = "shadowsocksr" })
-
-	local ssr_protocol_list = {
-		"origin", "verify_simple", "verify_deflate", "verify_sha1", "auth_simple",
-		"auth_sha1", "auth_sha1_v2", "auth_sha1_v4", "auth_aes128_md5",
-		"auth_aes128_sha1", "auth_chain_a", "auth_chain_b", "auth_chain_c",
-		"auth_chain_d", "auth_chain_e", "auth_chain_f"
-	}
-
-	o = s:option(ListValue, _n("ssr_protocol"), translate("Protocol"))
-	for a, t in ipairs(ssr_protocol_list) do o:value(t) end
-	o:depends({ [_n("protocol")] = "shadowsocksr" })
-
-	o = s:option(Value, _n("ssr_protocol_param"), translate("Protocol_param"))
-	o:depends({ [_n("protocol")] = "shadowsocksr" })
-
-	local ssr_obfs_list = {
-		"plain", "http_simple", "http_post", "random_head", "tls_simple",
-		"tls1.0_session_auth", "tls1.2_ticket_auth"
-	}
-
-	o = s:option(ListValue, _n("ssr_obfs"), translate("Obfs"))
-	for a, t in ipairs(ssr_obfs_list) do o:value(t) end
-	o:depends({ [_n("protocol")] = "shadowsocksr" })
-
-	o = s:option(Value, _n("ssr_obfs_param"), translate("Obfs_param"))
-	o:depends({ [_n("protocol")] = "shadowsocksr" })
-end
-
 o = s:option(Flag, _n("uot"), translate("UDP over TCP"))
 o:depends({ [_n("protocol")] = "socks" })
 o:depends({ [_n("protocol")] = "shadowsocks" })
-
-o = s:option(Value, _n("uuid"), translate("ID"))
-o.password = true
-o:depends({ [_n("protocol")] = "vmess" })
-o:depends({ [_n("protocol")] = "vless" })
-o:depends({ [_n("protocol")] = "tuic" })
 
 o = s:option(Value, _n("alter_id"), "Alter ID")
 o.datatype = "uinteger"
@@ -331,6 +271,11 @@ o:depends({ [_n("protocol")] = "vless", [_n("tls")] = true })
 if singbox_tags:find("with_quic") then
 	o = s:option(Value, _n("hysteria_hop"), translate("Port hopping range"))
 	o.description = translate("Format as 1000:2000 or 1000-2000 Multiple groups are separated by commas (,).")
+	o:depends({ [_n("protocol")] = "hysteria" })
+
+	o = s:option(Value, _n("hysteria_hop_interval"), translate("Hop Interval"), translate("Example:") .. "30s (≥5s)")
+	o.placeholder = "30s"
+	o.default = "30s"
 	o:depends({ [_n("protocol")] = "hysteria" })
 
 	o = s:option(Value, _n("hysteria_obfs"), translate("Obfs Password"))
@@ -413,6 +358,11 @@ if singbox_tags:find("with_quic") then
 	o.description = translate("Format as 1000:2000 or 1000-2000 Multiple groups are separated by commas (,).")
 	o:depends({ [_n("protocol")] = "hysteria2" })
 
+	o = s:option(Value, _n("hysteria2_hop_interval"), translate("Hop Interval"), translate("Example:") .. "30s (≥5s)")
+	o.placeholder = "30s"
+	o.default = "30s"
+	o:depends({ [_n("protocol")] = "hysteria2" })
+
 	o = s:option(Value, _n("hysteria2_up_mbps"), translate("Max upload Mbps"))
 	o:depends({ [_n("protocol")] = "hysteria2" })
 
@@ -425,12 +375,30 @@ if singbox_tags:find("with_quic") then
 	o:depends({ [_n("protocol")] = "hysteria2" })
 
 	o = s:option(Value, _n("hysteria2_obfs_password"), translate("Obfs Password"))
-	o:depends({ [_n("protocol")] = "hysteria2" })
+	o:depends({ [_n("hysteria2_obfs_type")] = "salamander" })
 
 	o = s:option(Value, _n("hysteria2_auth_password"), translate("Auth Password"))
 	o.password = true
 	o:depends({ [_n("protocol")] = "hysteria2"})
 end
+
+-- [[ SSH config start ]] --
+o = s:option(Value, _n("ssh_priv_key"), translate("Private Key"))
+o:depends({ [_n("protocol")] = "ssh" })
+
+o = s:option(Value, _n("ssh_priv_key_pp"), translate("Private Key Passphrase"))
+o.password = true
+o:depends({ [_n("protocol")] = "ssh" })
+
+o = s:option(DynamicList, _n("ssh_host_key"), translate("Host Key"), translate("Accept any if empty."))
+o:depends({ [_n("protocol")] = "ssh" })
+
+o = s:option(DynamicList, _n("ssh_host_key_algo"), translate("Host Key Algorithms"))
+o:depends({ [_n("protocol")] = "ssh" })
+
+o = s:option(Value, _n("ssh_client_version"), translate("Client Version"), translate("Random version will be used if empty."))
+o:depends({ [_n("protocol")] = "ssh" })
+-- [[ SSH config end ]] --
 
 o = s:option(Flag, _n("tls"), translate("TLS"))
 o.default = 0
@@ -475,35 +443,25 @@ o:depends({ [_n("protocol")] = "tuic" })
 o:depends({ [_n("protocol")] = "hysteria2" })
 o:depends({ [_n("protocol")] = "shadowsocks" })
 
-if singbox_tags:find("with_ech") then
-	o = s:option(Flag, _n("ech"), translate("ECH"))
-	o.default = "0"
-	o:depends({ [_n("tls")] = true, [_n("flow")] = "", [_n("reality")] = false })
-	o:depends({ [_n("protocol")] = "tuic" })
-	o:depends({ [_n("protocol")] = "hysteria" })
-	o:depends({ [_n("protocol")] = "hysteria2" })
+o = s:option(Flag, _n("ech"), translate("ECH"))
+o.default = "0"
+o:depends({ [_n("tls")] = true, [_n("flow")] = "", [_n("reality")] = false })
+o:depends({ [_n("protocol")] = "tuic" })
+o:depends({ [_n("protocol")] = "hysteria" })
+o:depends({ [_n("protocol")] = "hysteria2" })
 
-	o = s:option(TextValue, _n("ech_config"), translate("ECH Config"))
-	o.default = ""
-	o.rows = 5
-	o.wrap = "off"
-	o:depends({ [_n("ech")] = true })
-	o.validate = function(self, value)
-		value = value:gsub("^%s+", ""):gsub("%s+$","\n"):gsub("\r\n","\n"):gsub("[ \t]*\n[ \t]*", "\n")
-		value = value:gsub("^%s*\n", "")
-		if value:sub(-1) == "\n" then
-			value = value:sub(1, -2)
-		end
-		return value
+o = s:option(TextValue, _n("ech_config"), translate("ECH Config"))
+o.default = ""
+o.rows = 5
+o.wrap = "off"
+o:depends({ [_n("ech")] = true })
+o.validate = function(self, value)
+	value = value:gsub("^%s+", ""):gsub("%s+$","\n"):gsub("\r\n","\n"):gsub("[ \t]*\n[ \t]*", "\n")
+	value = value:gsub("^%s*\n", "")
+	if value:sub(-1) == "\n" then  
+		value = value:sub(1, -2)  
 	end
-
-	o = s:option(Flag, _n("pq_signature_schemes_enabled"), translate("PQ signature schemes"))
-	o.default = "0"
-	o:depends({ [_n("ech")] = true })
-
-	o = s:option(Flag, _n("dynamic_record_sizing_disabled"), translate("Disable adaptive sizing of TLS records"))
-	o.default = "0"
-	o:depends({ [_n("ech")] = true })
+	return value
 end
 
 if singbox_tags:find("with_utls") then
@@ -516,30 +474,30 @@ if singbox_tags:find("with_utls") then
 	o:value("firefox")
 	o:value("edge")
 	o:value("safari")
-	-- o:value("360")
+	o:value("360")
 	o:value("qq")
 	o:value("ios")
-	-- o:value("android")
+	o:value("android")
 	o:value("random")
-	-- o:value("randomized")
+	o:value("randomized")
 	o.default = "chrome"
-	o:depends({ [_n("tls")] = true, [_n("utls")] = true })
+	o:depends({ [_n("utls")] = true })
 
 	-- [[ REALITY部分 ]] --
 	o = s:option(Flag, _n("reality"), translate("REALITY"))
 	o.default = 0
-	o:depends({ [_n("protocol")] = "vless", [_n("utls")] = true })
-	o:depends({ [_n("protocol")] = "vmess", [_n("utls")] = true })
-	o:depends({ [_n("protocol")] = "shadowsocks", [_n("utls")] = true })
-	o:depends({ [_n("protocol")] = "socks", [_n("utls")] = true })
-	o:depends({ [_n("protocol")] = "trojan", [_n("utls")] = true })
-	o:depends({ [_n("protocol")] = "anytls", [_n("utls")] = true })
-
+	o:depends({ [_n("protocol")] = "vless", [_n("tls")] = true })
+	o:depends({ [_n("protocol")] = "vmess", [_n("tls")] = true })
+	o:depends({ [_n("protocol")] = "shadowsocks", [_n("tls")] = true })
+	o:depends({ [_n("protocol")] = "socks", [_n("tls")] = true })
+	o:depends({ [_n("protocol")] = "trojan", [_n("tls")] = true })
+	o:depends({ [_n("protocol")] = "anytls", [_n("tls")] = true })
+	
 	o = s:option(Value, _n("reality_publicKey"), translate("Public Key"))
-	o:depends({ [_n("utls")] = true, [_n("reality")] = true })
-
+	o:depends({ [_n("reality")] = true })
+	
 	o = s:option(Value, _n("reality_shortId"), translate("Short Id"))
-	o:depends({ [_n("utls")] = true, [_n("reality")] = true })
+	o:depends({ [_n("reality")] = true })
 end
 
 o = s:option(ListValue, _n("transport"), translate("Transport"))
@@ -658,6 +616,13 @@ o = s:option(Flag, _n("grpc_permit_without_stream"), translate("Permit without s
 o.default = "0"
 o:depends({ [_n("grpc_health_check")] = true })
 
+-- [[ User-Agent ]]--
+o = s:option(Value, _n("user_agent"), translate("User-Agent"))
+o:depends({ [_n("tcp_guise")] = "http" })
+o:depends({ [_n("transport")] = "http" })
+o:depends({ [_n("transport")] = "ws" })
+o:depends({ [_n("transport")] = "httpupgrade" })
+
 -- [[ Mux ]]--
 o = s:option(Flag, _n("mux"), translate("Mux"))
 o.rmempty = false
@@ -757,7 +722,6 @@ o:value("ipv6_only", translate("IPv6 Only"))
 o:depends({ [_n("protocol")] = "socks" })
 o:depends({ [_n("protocol")] = "http" })
 o:depends({ [_n("protocol")] = "shadowsocks" })
-o:depends({ [_n("protocol")] = "shadowsocksr" })
 o:depends({ [_n("protocol")] = "vmess" })
 o:depends({ [_n("protocol")] = "trojan" })
 o:depends({ [_n("protocol")] = "wireguard" })
@@ -766,28 +730,53 @@ o:depends({ [_n("protocol")] = "vless" })
 o:depends({ [_n("protocol")] = "tuic" })
 o:depends({ [_n("protocol")] = "hysteria2" })
 o:depends({ [_n("protocol")] = "anytls" })
-
-o = s:option(ListValue, _n("chain_proxy"), translate("Chain Proxy"))
-o:value("", translate("Close(Not use)"))
-o:value("1", translate("Preproxy Node"))
-o:value("2", translate("Landing Node"))
-for i, v in ipairs(s.fields[_n("protocol")].keylist) do
-	if not v:find("_") then
-		o:depends({ [_n("protocol")] = v })
-	end
 end
+-- [[ Normal single node End ]]
 
-o = s:option(ListValue, _n("preproxy_node"), translate("Preproxy Node"), translate("Only support a layer of proxy."))
-o:depends({ [_n("chain_proxy")] = "1" })
+if not load_shunt_options then
+	o = s:option(ListValue, _n("chain_proxy"), translate("Chain Proxy"))
+	o:value("", translate("Close(Not use)"))
+	if not (load_iface_options or load_urltest_options) then
+		-- Special node cannot be use pre-proxy.
+		o:value("1", translate("Preproxy Node"))
+	end
+	o:value("2", translate("Landing Node"))
 
-o = s:option(ListValue, _n("to_node"), translate("Landing Node"), translate("Only support a layer of proxy."))
-o:depends({ [_n("chain_proxy")] = "2" })
+	o1 = s:option(ListValue, _n("preproxy_node"), translate("Preproxy Node"), translate("Only support a layer of proxy."))
+	o1:depends({ [_n("chain_proxy")] = "1" })
+	o1.template = appname .. "/cbi/nodes_listvalue"
+	o1.group = {}
 
-for k, v in pairs(nodes_table) do
-	if v.type == "sing-box" and v.id ~= arg[1] then
-		s.fields[_n("preproxy_node")]:value(v.id, v.remark)
-		s.fields[_n("to_node")]:value(v.id, v.remark)
+	o2 = s:option(ListValue, _n("to_node"), translate("Landing Node"), translate("Only support a layer of proxy."))
+	o2:depends({ [_n("chain_proxy")] = "2" })
+	o2.template = appname .. "/cbi/nodes_listvalue"
+	o2.group = {}
+
+	for k1, v1 in pairs(node_list) do
+		if k1 ~= "shunt_list" and k1 ~= "iface_list" then
+			for i, v in ipairs(v1) do
+				if v.id ~= arg[1] then
+					o1:value(v.id, v.remark)
+					o1.group[#o1.group+1] = (v.group and v.group ~= "") and v.group or translate("default")
+					if k1 == "normal_list" then
+						-- Landing Node not support use special node.
+						o2:value(v.id, v.remark)
+						o2.group[#o2.group+1] = (v.group and v.group ~= "") and v.group or translate("default")
+					end
+				end
+			end
+		end
 	end
 end
 
 api.luci_types(arg[1], m, s, type_name, option_prefix)
+
+if load_shunt_options then
+	local current_node = m.uci:get_all(appname, arg[1]) or {}
+	local shunt_lua = loadfile("/usr/lib/lua/luci/model/cbi/passwall/client/include/shunt_options.lua")
+	setfenv(shunt_lua, getfenv(1))(m, s, {
+		node_id = arg[1],
+		node = current_node,
+		node_list = node_list,
+	})
+end

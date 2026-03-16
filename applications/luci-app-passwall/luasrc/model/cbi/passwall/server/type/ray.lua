@@ -21,7 +21,7 @@ local x_ss_method_list = {
 }
 
 local header_type_list = {
-	"none", "srtp", "utp", "wechat-video", "dtls", "wireguard"
+	"none", "srtp", "utp", "wechat-video", "dtls", "wireguard", "dns"
 }
 
 -- [[ Xray ]]
@@ -79,9 +79,14 @@ o = s:option(Value, _n("d_port"), translate("Destination port"))
 o.datatype = "port"
 o:depends({ [_n("protocol")] = "dokodemo-door" })
 
-o = s:option(Value, _n("decryption"), translate("Encrypt Method"))
+o = s:option(Value, _n("decryption"), translate("Encrypt Method") .. " (decryption)")
 o.default = "none"
+o.placeholder = "none"
 o:depends({ [_n("protocol")] = "vless" })
+o.validate = function(self, value)
+	value = api.trim(value)
+	return (value == "" and "none" or value)
+end
 
 o = s:option(ListValue, _n("x_ss_method"), translate("Encrypt Method"))
 o.rewrite_option = "method"
@@ -115,7 +120,7 @@ o = s:option(ListValue, _n("flow"), translate("flow"))
 o.default = ""
 o:value("", translate("Disable"))
 o:value("xtls-rprx-vision")
-o:depends({ [_n("protocol")] = "vless", [_n("tls")] = true, [_n("transport")] = "raw" })
+o:depends({ [_n("protocol")] = "vless" })
 
 o = s:option(Flag, _n("tls"), translate("TLS"))
 o.default = 0
@@ -184,7 +189,20 @@ o:value("h3,h2")
 o:value("http/1.1")
 o:value("h2,http/1.1")
 o:value("h3,h2,http/1.1")
-o:depends({ [_n("tls")] = true })
+o:depends({ [_n("tls")] = true, [_n("reality")] = false })
+
+o = s:option(Flag, _n("use_mldsa65Seed"), translate("ML-DSA-65"))
+o.default = "0"
+o:depends({ [_n("reality")] = true })
+
+o = s:option(TextValue, _n("reality_mldsa65Seed"), "ML-DSA-65 " .. translate("Private Key"))
+o.default = ""
+o.rows = 5
+o.wrap = "soft"
+o:depends({ [_n("use_mldsa65Seed")] = true })
+o.validate = function(self, value)
+	return api.trim(value:gsub("[\r\n]", ""))
+end
 
 -- o = s:option(Value, _n("minversion"), translate("minversion"))
 -- o.default = "1.3"
@@ -223,12 +241,23 @@ o.validate = function(self, value, t)
 	return nil
 end
 
+o = s:option(Flag, _n("ech"), translate("ECH"))
+o.default = "0"
+o:depends({ [_n("tls")] = true, [_n("reality")] = false })
+
+o = s:option(TextValue, _n("ech_key"), translate("ECH Key"))
+o.default = ""
+o.rows = 5
+o.wrap = "soft"
+o:depends({ [_n("ech")] = true })
+o.validate = function(self, value)
+	return api.trim(value:gsub("[\r\n]", ""))
+end
+
 o = s:option(ListValue, _n("transport"), translate("Transport"))
 o:value("raw", "RAW")
 o:value("mkcp", "mKCP")
 o:value("ws", "WebSocket")
-o:value("ds", "DomainSocket")
-o:value("quic", "QUIC")
 o:value("grpc", "gRPC")
 o:value("httpupgrade", "HttpUpgrade")
 o:value("xhttp", "XHTTP")
@@ -254,7 +283,7 @@ o = s:option(Value, _n("httpupgrade_path"), translate("HttpUpgrade Path"))
 o.placeholder = "/"
 o:depends({ [_n("transport")] = "httpupgrade" })
 
--- [[ SplitHTTP部分 ]]--
+-- [[ XHTTP部分 ]]--
 o = s:option(Value, _n("xhttp_host"), translate("XHTTP Host"))
 o:depends({ [_n("transport")] = "xhttp" })
 
@@ -288,9 +317,12 @@ o:depends({ [_n("tcp_guise")] = "http" })
 
 -- [[ mKCP部分 ]]--
 
-o = s:option(ListValue, _n("mkcp_guise"), translate("Camouflage Type"), translate('<br />none: default, no masquerade, data sent is packets with no characteristics.<br />srtp: disguised as an SRTP packet, it will be recognized as video call data (such as FaceTime).<br />utp: packets disguised as uTP will be recognized as bittorrent downloaded data.<br />wechat-video: packets disguised as WeChat video calls.<br />dtls: disguised as DTLS 1.2 packet.<br />wireguard: disguised as a WireGuard packet. (not really WireGuard protocol)'))
+o = s:option(ListValue, _n("mkcp_guise"), translate("Camouflage Type"), translate('<br />none: default, no masquerade, data sent is packets with no characteristics.<br />srtp: disguised as an SRTP packet, it will be recognized as video call data (such as FaceTime).<br />utp: packets disguised as uTP will be recognized as bittorrent downloaded data.<br />wechat-video: packets disguised as WeChat video calls.<br />dtls: disguised as DTLS 1.2 packet.<br />wireguard: disguised as a WireGuard packet. (not really WireGuard protocol)<br />dns: Disguising traffic as DNS requests.'))
 for a, t in ipairs(header_type_list) do o:value(t) end
 o:depends({ [_n("transport")] = "mkcp" })
+
+o = s:option(Value, _n("mkcp_domain"), translate("Camouflage Domain"), translate("Use it together with the DNS disguised type. You can fill in any domain."))
+o:depends({ [_n("mkcp_guise")] = "dns" })
 
 o = s:option(Value, _n("mkcp_mtu"), translate("KCP MTU"))
 o.default = "1350"
@@ -322,30 +354,49 @@ o:depends({ [_n("transport")] = "mkcp" })
 o = s:option(Value, _n("mkcp_seed"), translate("KCP Seed"))
 o:depends({ [_n("transport")] = "mkcp" })
 
--- [[ DomainSocket部分 ]]--
-
-o = s:option(Value, _n("ds_path"), "Path", translate("A legal file path. This file must not exist before running."))
-o:depends({ [_n("transport")] = "ds" })
-
--- [[ QUIC部分 ]]--
-o = s:option(ListValue, _n("quic_security"), translate("Encrypt Method"))
-o:value("none")
-o:value("aes-128-gcm")
-o:value("chacha20-poly1305")
-o:depends({ [_n("transport")] = "quic" })
-
-o = s:option(Value, _n("quic_key"), translate("Encrypt Method") .. translate("Key"))
-o:depends({ [_n("transport")] = "quic" })
-
-o = s:option(ListValue, _n("quic_guise"), translate("Camouflage Type"))
-for a, t in ipairs(header_type_list) do o:value(t) end
-o:depends({ [_n("transport")] = "quic" })
-
 -- [[ gRPC部分 ]]--
 o = s:option(Value, _n("grpc_serviceName"), "ServiceName")
 o:depends({ [_n("transport")] = "grpc" })
 
+--[[FinalMask]]
+o = s:option(Flag, _n("use_finalmask"), "FinalMask")
+o.default = "0"
+o:depends({ [_n("custom")] = false, [_n("protocol")] = "vmess" })
+o:depends({ [_n("custom")] = false, [_n("protocol")] = "vless" })
+o:depends({ [_n("custom")] = false, [_n("protocol")] = "trojan" })
+o:depends({ [_n("custom")] = false, [_n("protocol")] = "shadowsocks" })
+o:depends({ [_n("custom")] = false, [_n("protocol")] = "wireguard" })
+o:depends({ [_n("custom")] = false, [_n("protocol")] = "hysteria2" })
+
+o = s:option(TextValue, _n("finalmask"), "FinalMask JSON")
+o:depends({ [_n("use_finalmask")] = true })
+o.rows = 10
+o.wrap = "off"
+o.custom_cfgvalue = function(self, section, value)
+	local raw = m:get(section, "finalmask")
+	if raw then
+		return api.base64Decode(raw)
+	end
+end
+o.custom_write = function(self, section, value)
+	m:set(section, "finalmask", api.base64Encode(value) or "")
+end
+o.validate = function(self, value)
+	value = api.trim(value):gsub("\r\n", "\n"):gsub("^[ \t]*\n", ""):gsub("\n[ \t]*$", ""):gsub("\n[ \t]*\n", "\n")
+	if api.jsonc.parse(value) then
+		return value
+	else
+		return nil, "FinalMask " .. translate("Must be JSON text!")
+	end
+end
+
+--[[acceptProxyProtocol]]
 o = s:option(Flag, _n("acceptProxyProtocol"), translate("acceptProxyProtocol"), translate("Whether to receive PROXY protocol, when this node want to be fallback or forwarded by proxy, it must be enable, otherwise it cannot be used."))
+o.default = "0"
+o:depends({ [_n("custom")] = false })
+
+--[[Fast Open]]
+o = s:option(Flag, _n("tcp_fast_open"), "TCP " .. translate("Fast Open"))
 o.default = "0"
 o:depends({ [_n("custom")] = false })
 
@@ -385,7 +436,8 @@ for k, e in ipairs(api.get_valid_nodes()) do
 	if e.node_type == "normal" and e.type == type_name then
 		nodes_table[#nodes_table + 1] = {
 			id = e[".name"],
-			remarks = e["remark"]
+			remarks = e["remark"],
+			group = e["group"]
 		}
 	end
 end
@@ -395,7 +447,12 @@ o:value("", translate("Close"))
 o:value("_socks", translate("Custom Socks"))
 o:value("_http", translate("Custom HTTP"))
 o:value("_iface", translate("Custom Interface"))
-for k, v in pairs(nodes_table) do o:value(v.id, v.remarks) end
+o.template = api.appname .. "/cbi/nodes_listvalue"
+o.group = {"","","",""}
+for k, v in pairs(nodes_table) do
+	o:value(v.id, v.remarks)
+	o.group[#o.group+1] = (v.group and v.group ~= "") and v.group or translate("default")
+end
 o:depends({ [_n("custom")] = false })
 
 o = s:option(Value, _n("outbound_node_address"), translate("Address (Support Domain Name)"))
@@ -428,7 +485,7 @@ o.validate = function(self, value, t)
 	if value and api.jsonc.parse(value) then
 		return value
 	else
-		return nil, translate("Must be JSON text!")
+		return nil, translate("Custom Config") .. " " .. translate("Must be JSON text!")
 	end
 end
 o.custom_cfgvalue = function(self, section, value)
@@ -438,7 +495,7 @@ o.custom_cfgvalue = function(self, section, value)
 	end
 end
 o.custom_write = function(self, section, value)
-	m:set(section, "config_str", api.base64Encode(value))
+	m:set(section, "config_str", api.base64Encode(value) or "")
 end
 
 o = s:option(Flag, _n("log"), translate("Log"))

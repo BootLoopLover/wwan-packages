@@ -2,35 +2,30 @@
 
 START=99
 STOP=15
-PROG=passwall
 
-CONFIG=$PROG
-APP_FILE=/usr/share/${CONFIG}/app.sh
+ROOT="${IPKG_INSTROOT:-}"
+. "$ROOT/usr/share/passwall/utils.sh"
+APP_FILE=${APP_PATH}/app.sh
 LOCK_FILE_DIR=/var/lock
 LOCK_FILE=${LOCK_FILE_DIR}/${CONFIG}.lock
-READY_FILE=${LOCK_FILE_DIR}/${CONFIG}_ready.lock
 
-# Create lock (using directory method for OpenWrt compatibility)
 set_lock() {
-	[ ! -d "$LOCK_FILE_DIR" ] && mkdir -p "$LOCK_FILE_DIR"
-	if ! mkdir "$LOCK_FILE" 2>/dev/null; then
-		# Lock already exists
-		return 1
-	fi
+	[ ! -d "$LOCK_FILE_DIR" ] && mkdir -p $LOCK_FILE_DIR
+	exec 999>"$LOCK_FILE"
+	flock -xn 999
 }
 
-# Remove lock
 unset_lock() {
+	flock -u 999
 	rm -rf "$LOCK_FILE"
 }
 
-# Wait for lock to be released, then remove it
 unlock() {
 	failcount=1
 	while [ "$failcount" -le 10 ]; do
-		if [ -d "$LOCK_FILE" ]; then
+		if [ -f "$LOCK_FILE" ]; then
 			let "failcount++"
-			sleep 1
+			sleep 1s
 			[ "$failcount" -ge 10 ] && unset_lock
 		else
 			break
@@ -38,54 +33,45 @@ unlock() {
 	done
 }
 
-# Runs at boot
-boot() {
+boot_func() {
 	local delay=$(uci -q get ${CONFIG}.@global_delay[0].start_delay || echo 1)
 	if [ "$delay" -gt 0 ]; then
-		$APP_FILE echolog "Delaying start by $delay seconds..."
+		echolog "执行启动延时 $delay 秒后再启动!"
 		sleep $delay
 	fi
-	restart
-	touch "$READY_FILE"
+	restart boot
+	touch ${LOCK_FILE_DIR}/${CONFIG}_ready.lock
 }
 
-# Start the service
+boot() {
+	boot_func >/dev/null 2>&1 &
+}
+
 start() {
-	set_lock || {
-		$APP_FILE echolog "Script is already running. Exiting."
-		return 1
-	}
+	set_lock
+	[ $? == 1 ] && echolog "脚本已经在运行，不重复运行，退出." && exit 0
 	$APP_FILE start
 	unset_lock
 }
 
-# Stop the service
 stop() {
 	unlock
-	set_lock || {
-		$APP_FILE echolog "Timeout waiting to stop script. Exiting."
-		return 1
-	}
+	set_lock
+	[ $? == 1 ] && echolog "停止脚本等待超时，不重复运行，退出." && exit 0
 	$APP_FILE stop
 	unset_lock
 }
 
-# Restart the service
 restart() {
-	set_lock || {
-		$APP_FILE echolog "Script is already running. Exiting."
-		return 1
-	}
+	set_lock
+	[ $? == 1 ] && echolog "脚本已经在运行，不重复运行，退出." && exit 0
 	$APP_FILE stop
-	$APP_FILE start
+	$APP_FILE start $1
 	unset_lock
 }
 
-# LuCI compatibility
-start_service() {
-	start
-}
-
-stop_service() {
-	stop
+reload() {
+	echo "Warning: This service does not support configuration reloading"
+	echo "Performing full restart instead..."
+	restart
 }

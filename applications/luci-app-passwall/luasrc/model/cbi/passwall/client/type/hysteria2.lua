@@ -1,22 +1,24 @@
 local m, s = ...
 
-local api = require "luci.passwall.api"
-
 if not api.finded_com("hysteria") then
 	return
 end
 
-local type_name = "Hysteria2"
+type_name = "Hysteria2"
+
+-- [[ Hysteria2 ]]
+
+s.fields["type"]:value(type_name, "Hysteria2")
+
+if s.val["type"] ~= type_name then
+	return
+end
 
 local option_prefix = "hysteria2_"
 
 local function _n(name)
 	return option_prefix .. name
 end
-
--- [[ Hysteria2 ]]
-
-s.fields["type"]:value(type_name, "Hysteria2")
 
 o = s:option(ListValue, _n("protocol"), translate("Protocol"))
 o:value("udp", "UDP")
@@ -28,6 +30,11 @@ o.datatype = "port"
 
 o = s:option(Value, _n("hop"), translate("Port hopping range"))
 o.description = translate("Format as 1000:2000 or 1000-2000 Multiple groups are separated by commas (,).")
+o.rewrite_option = o.option
+
+o = s:option(Value, _n("hop_interval"), translate("Hop Interval"), translate("Example:") .. "30s (≥5s)")
+o.placeholder = "30s"
+o.default = "30s"
 o.rewrite_option = o.option
 
 o = s:option(Value, _n("obfs"), translate("Obfs Password"))
@@ -52,9 +59,6 @@ o = s:option(Value, _n("up_mbps"), translate("Max upload Mbps"))
 o.rewrite_option = o.option
 
 o = s:option(Value, _n("down_mbps"), translate("Max download Mbps"))
-o.rewrite_option = o.option
-
-o = s:option(Value, _n("hop_interval"), translate("Hop Interval"), translate("Example:") .. "30s (≥5s)")
 o.rewrite_option = o.option
 
 o = s:option(Value, _n("recv_window"), translate("QUIC stream receive window"))
