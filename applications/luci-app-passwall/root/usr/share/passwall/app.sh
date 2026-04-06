@@ -301,7 +301,7 @@ run_dns2socks() {
 }
 
 run_chinadns_ng() {
-	local _flag _listen_port _dns_local _dns_trust _no_ipv6_trust _use_direct_list _use_proxy_list _gfwlist _chnlist _default_mode _default_tag _no_logic_log _tcp_node _remote_fakedns
+	local _flag _listen_port _dns_local _dns_trust _no_ipv6_trust _use_direct_list _use_proxy_list _gfwlist _chnlist _default_mode _default_tag _no_logic_log _tcp_node _remote_fakedns _filter_https
 	local _extra_param=""
 	eval_set_val $@
 
@@ -313,7 +313,7 @@ run_chinadns_ng() {
 	_extra_param="${_extra_param} -USE_DIRECT_LIST ${_use_direct_list} -USE_PROXY_LIST ${_use_proxy_list} -USE_BLOCK_LIST ${_use_block_list}"
 	_extra_param="${_extra_param} -GFWLIST ${_gfwlist} -CHNLIST ${_chnlist} -NO_IPV6_TRUST ${_no_ipv6_trust} -DEFAULT_MODE ${_default_mode}"
 	_extra_param="${_extra_param} -DEFAULT_TAG ${_default_tag} -NFTFLAG ${nftflag} -NO_LOGIC_LOG ${_no_logic_log} -REMOTE_FAKEDNS ${_remote_fakedns}"
-	_extra_param="${_extra_param} -LOG_FILE ${_LOG_FILE}"
+	_extra_param="${_extra_param} -FILTER_HTTPS ${_filter_https} -LOG_FILE ${_LOG_FILE}"
 
 	lua $APP_PATH/helper_chinadns_add.lua ${_extra_param} > ${_CONF_FILE}
 	ln_run "$(first_type chinadns-ng)" chinadns-ng "${_LOG_FILE}" -C ${_CONF_FILE}
@@ -1101,6 +1101,9 @@ socks_node_switch() {
 		LOG_FILE="/dev/null"
 		run_socks flag=$flag node=$new_node bind=$bind socks_port=$port config_file=$config_file http_port=$http_port http_config_file=$http_config_file log_file=$log_file
 		set_cache_var "socks_${flag}" "$new_node"
+		local ENABLED_DEFAULT_ACL=$(get_cache_var "ENABLED_DEFAULT_ACL")
+		local ENABLED_ACLS=$(get_cache_var "ENABLED_ACLS")
+		[ "$ENABLED_DEFAULT_ACL" != "1" -a "$ENABLED_ACLS" != "1" ] && return
 		local USE_TABLES=$(get_cache_var "USE_TABLES")
 		[ -n "$USE_TABLES" ] && source $APP_PATH/${USE_TABLES}.sh filter_direct_node_list
 	}
@@ -1478,7 +1481,8 @@ start_dns() {
 			_default_tag=$(config_t_get global chinadns_ng_default_tag smart) \
 			_no_logic_log=0 \
 			_tcp_node=${TCP_NODE} \
-			_remote_fakedns=${fakedns:-0}
+			_remote_fakedns=${fakedns:-0} \
+			_filter_https=$(config_t_get global force_https_soa 0)
 
 		USE_DEFAULT_DNS="chinadns_ng"
 	}
@@ -1646,7 +1650,7 @@ acl_app() {
 										run_dns2socks flag=acl_${sid} socks_address=127.0.0.1 socks_port=$socks_port listen_address=0.0.0.0 listen_port=${_dns_port} dns=$remote_dns cache=1
 									elif [ "$dns_mode" = "sing-box" -o "$dns_mode" = "xray" ]; then
 										config_file=$TMP_ACL_PATH/${tcp_node}_SOCKS_${socks_port}_DNS.json
-										[ "$dns_mode" = "xray" ] && [ "$v2ray_dns_mode" = "tcp+doh" ] && remote_dns_doh=${remote_dns_doh:-https://1.1.1.1/dns-query}
+										remote_dns_doh=${remote_dns_doh:-https://1.1.1.1/dns-query}
 										local type=${dns_mode}
 										[ "${dns_mode}" = "sing-box" ] && type="singbox"
 										dnsmasq_filter_proxy_ipv6=0
@@ -1694,7 +1698,8 @@ acl_app() {
 										_default_tag=${chinadns_ng_default_tag:-smart} \
 										_no_logic_log=1 \
 										_tcp_node=${tcp_node} \
-										_remote_fakedns=0
+										_remote_fakedns=${remote_fakedns:-0} \
+										_filter_https=${force_https_soa:-0}
 
 									use_default_dns="chinadns_ng"
 								}
@@ -1737,15 +1742,14 @@ acl_app() {
 								if [ -n "${type}" ] && ([ "${type}" = "sing-box" ] || [ "${type}" = "xray" ]); then
 									config_file="acl/${tcp_node}_TCP_${redir_port}.json"
 									_extra_param="socks_address=127.0.0.1 socks_port=$socks_port"
-									if [ "$dns_mode" = "sing-box" ] || [ "$dns_mode" = "xray" ]; then
+									if ([ "$dns_mode" = "sing-box" ] || [ "$dns_mode" = "xray" ]) && [ "${type}" = "${dns_mode}" ]; then
 										dns_port=$(get_new_port $(expr $dns_port + 1))
 										_dns_port=$dns_port
 										config_file="${config_file//TCP_/DNS_${_dns_port}_TCP_}"
-										remote_dns_doh=${remote_dns}
 										dnsmasq_filter_proxy_ipv6=0
 										remote_dns_query_strategy="UseIP"
 										[ "$filter_proxy_ipv6" = "1" ] && remote_dns_query_strategy="UseIPv4"
-										[ "$dns_mode" = "xray" ] && [ "$v2ray_dns_mode" = "tcp+doh" ] && remote_dns_doh=${remote_dns_doh:-https://1.1.1.1/dns-query}
+										remote_dns_doh=${remote_dns_doh:-https://1.1.1.1/dns-query}
 										_extra_param="dns_listen_port=${_dns_port} remote_dns_protocol=${v2ray_dns_mode} remote_dns_udp_server=${remote_dns} remote_dns_tcp_server=${remote_dns} remote_dns_doh=${remote_dns_doh} remote_dns_query_strategy=${remote_dns_query_strategy} remote_dns_client_ip=${remote_dns_client_ip}"
 									fi
 									_extra_param="${_extra_param} tcp_proxy_way=$TCP_PROXY_WAY"
@@ -1775,7 +1779,7 @@ acl_app() {
 				[ -n "$tcp_node" ] && {
 					local protocol=$(config_n_get $tcp_node protocol)
 					[ "$protocol" = "_shunt" ] && [ "$udp_node" != "default" ] && {
-						udp_node = "tcp"
+						udp_node="tcp"
 					}
 				}
 				if [ "$udp_node" = "default" ]; then
@@ -1834,7 +1838,7 @@ acl_app() {
 			}
 			unset enabled sid remarks sources interface tcp_no_redir_ports udp_no_redir_ports use_global_config tcp_node udp_node use_direct_list use_proxy_list use_block_list use_gfw_list chn_list tcp_proxy_mode udp_proxy_mode filter_proxy_ipv6 dns_mode remote_dns v2ray_dns_mode remote_dns_doh remote_dns_client_ip
 			unset _ip _mac _iprange _ipset _ip_or_mac source_list tcp_port udp_port config_file _extra_param
-			unset _china_ng_listen _chinadns_local_dns _direct_dns_mode chinadns_ng_default_tag dnsmasq_filter_proxy_ipv6
+			unset _china_ng_listen _chinadns_local_dns _direct_dns_mode chinadns_ng_default_tag dnsmasq_filter_proxy_ipv6 remote_fakedns force_https_soa
 		done
 		unset socks_port redir_port dns_port dnsmasq_port chinadns_port
 	}
@@ -1978,6 +1982,8 @@ get_config() {
 	[ "$ENABLED_ACLS" = 1 ] && {
 		[ "$(uci show ${CONFIG} | grep "@acl_rule" | grep "enabled='1'" | wc -l)" == 0 ] && ENABLED_ACLS=0
 	}
+	set_cache_var ENABLED_DEFAULT_ACL $ENABLED_DEFAULT_ACL
+	set_cache_var ENABLED_ACLS $ENABLED_ACLS
 
 	TCP_PROXY_WAY=$(config_t_get global_forwarding tcp_proxy_way redirect)
 	PROXY_IPV6=$(config_t_get global_forwarding ipv6_tproxy 0)

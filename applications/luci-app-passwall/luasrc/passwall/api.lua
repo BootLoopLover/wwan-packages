@@ -1,37 +1,28 @@
 module("luci.passwall.api", package.seeall)
-appname = "passwall"
 local com = require "luci.passwall.com"
 nixio = require "nixio"
 fs = require "nixio.fs"
 sys = require "luci.sys"
-uci = require"luci.model.uci".cursor()
+uci = require "luci.model.uci".cursor()
 util = require "luci.util"
 datatypes = require "luci.cbi.datatypes"
 jsonc = require "luci.jsonc"
 i18n = require "luci.i18n"
 
+appname = "passwall"
 curl_args = { "-skfL", "--connect-timeout 3", "--retry 3" }
 command_timeout = 300
 OPENWRT_ARCH = nil
 DISTRIB_ARCH = nil
+OPENWRT_BOARD = nil
 
-LOG_FILE = "/tmp/log/passwall.log"
-CACHE_PATH = "/tmp/etc/passwall_tmp"
+CACHE_PATH = "/tmp/etc/" .. appname .. "_tmp"
+LOG_FILE = "/tmp/log/" .. appname .. ".log"
 TMP_PATH = "/tmp/etc/" .. appname
 TMP_IFACE_PATH = TMP_PATH .. "/iface"
 
-local lang = uci:get("luci", "main", "lang") or "auto"
-if lang == "auto" then
-	local auto_lang = uci:get(appname, "@global[0]", "auto_lang")
-	if auto_lang then lang = auto_lang end
-end
-if lang == "auto" then
-	lang = i18n.default
-end
-i18n.setlanguage(lang)
-
-function echolog(...)
-	local result = table.concat({...}, " ")
+function log(...)
+	local result = os.date("%Y-%m-%d %H:%M:%S: ") .. table.concat({...}, " ")
 	local f, err = io.open(LOG_FILE, "a")
 	if f and err == nil then
 		f:write(result .. "\n")
@@ -39,21 +30,8 @@ function echolog(...)
 	end
 end
 
-function echolog_date(...)
-	local result = os.date("%Y-%m-%d %H:%M:%S: ") .. table.concat({...}, " ")
-	echolog(result)
-end
-
-function log(level, ...)
-	local indent = ""
-	if level >= 1 then
-		for i = 1, level, 1 do
-			indent = indent .. "  "
-		end
-		echolog_date(indent .. "- " .. table.concat({...}, " "))
-	else
-		echolog_date(table.concat({...}, " "))
-	end
+function is_js_luci()
+	return sys.call('[ -f "/www/luci-static/resources/uci.js" ]') == 0
 end
 
 function is_old_uci()
@@ -169,7 +147,7 @@ function UrlDecode(szText)
 	end) or nil
 end
 
--- Extract the domain name and port from the URL (no IP address).
+--提取URL中的域名和端口(no ip)
 function get_domain_port_from_url(url)
 	local scheme, domain, port = string.match(url, "^(https?)://([%w%.%-]+):?(%d*)")
 	if not domain then
@@ -182,7 +160,7 @@ function get_domain_port_from_url(url)
 	return domain, port
 end
 
--- Domain resolution
+--解析域名
 function domainToIPv4(domain, dns)
 	local Dns = dns or "223.5.5.5"
 	local IPs = luci.sys.exec('nslookup %s %s | awk \'/^Name:/{getline; if ($1 == "Address:") print $2}\'' % { domain, Dns })
@@ -202,8 +180,8 @@ function curl_base(url, file, args)
 end
 
 function curl_proxy(url, file, args)
-	-- Use the proxy
-	local socks_server = get_cache_var("GLOBAL_SOCKS_server")
+	--使用代理
+	local socks_server = get_cache_var("GLOBAL_TCP_SOCKS_server")
 	if socks_server and socks_server ~= "" then
 		if not args then args = {} end
 		local tmp_args = clone(args)
@@ -222,12 +200,14 @@ function curl_logic(url, file, args)
 end
 
 function curl_direct(url, file, args)
-	-- Direct access
+	--直连访问
+	local chn_list = uci:get(appname, "@global[0]", "chn_list") or "direct"
+	local Dns = (chn_list == "proxy") and "1.1.1.1" or "223.5.5.5"
 	if not args then args = {} end
 	local tmp_args = clone(args)
 	local domain, port = get_domain_port_from_url(url)
 	if domain then
-		local ip = domainToIPv4(domain)
+		local ip = domainToIPv4(domain, Dns)
 		if ip then
 			tmp_args[#tmp_args + 1] = "--resolve " .. domain .. ":" .. port .. ":" .. ip
 		end
@@ -238,7 +218,7 @@ end
 function curl_auto(url, file, args)
 	local localhost_proxy = uci:get(appname, "@global[0]", "localhost_proxy") or "1"
 	if localhost_proxy == "1" then
-		return curl_base(url, file, args)
+		return curl_base(url, file, args) -- 当路由器本机开启代理时，采用passwall规则进行访问
 	else
 		local return_code, result = curl_proxy(url, file, args)
 		if not return_code or return_code ~= 0 then
@@ -268,15 +248,16 @@ function trim(s)
 	return s:sub(i, j)
 end
 
+-- 分割字符串
 function split(full, sep)
 	if full then
-		full = full:gsub("%z", "") -- This is not very clear; sometimes it ends with a `\0`.
+		full = full:gsub("%z", "") -- 这里不是很清楚 有时候结尾带个\0
 		local off, result = 1, {}
 		while true do
 			local nStart, nEnd = full:find(sep, off)
 			if not nEnd then
 				local res = string.sub(full, off, string.len(full))
-				if #res > 0 then -- Filter out `\0`
+				if #res > 0 then -- 过滤掉 \0
 					table.insert(result, res)
 				end
 				break
@@ -365,7 +346,7 @@ function strToTable(str)
 	if str == nil or type(str) ~= "string" then
 		return {}
 	end
-	
+
 	return loadstring("return " .. str)()
 end
 
@@ -388,6 +369,18 @@ end
 function is_ipv6(val)
 	local str = val:match("%[(.-)%]") or val
 	return datatypes.ip6addr(str) or false
+end
+
+function is_local_ip(ip)
+	ip = trim(ip):lower()
+	ip = ip:gsub("^[%w%d]+://", "")   -- 去掉协议头
+		:gsub("/.*$", "")          -- 去掉路径
+		:gsub("^%[", ""):gsub("%]$", "") -- 去掉IPv6方括号
+		:gsub(":%d+$", "")         -- 去掉端口
+	return ip:match("^127%.") or ip:match("^10%.") or
+		ip:match("^172%.1[6-9]%.") or ip:match("^172%.2[0-9]%.") or
+		ip:match("^172%.3[0-1]%.") or ip:match("^192%.168%.") or
+		ip == "::1" or ip:match("^f[cd]") or ip:match("^fe[89ab]")
 end
 
 function is_ipv6addrport(val)
@@ -461,28 +454,8 @@ function get_domain_from_url(url)
 	return url
 end
 
-function get_node_name(node_id)
-	local e
-	if type(node_id) == "table" then
-		e = node_id
-	else
-		e = uci:get_all(appname, node_id)
-	end
-	if e then
-		if e.type and e.remarks then
-			if e.protocol and (e.protocol == "_balancing" or e.protocol == "_shunt" or e.protocol == "_iface") then
-				local type_name = e.type
-				if e.type == "sing-box" then type_name = "Sing-Box" end
-				local remark = "%s：[%s] " % {type_name .. " " .. i18n.translatef(e.protocol), e.remarks}
-				return remark
-			end
-		end
-	end
-	return ""
-end
-
 function get_valid_nodes()
-	local show_node_info = uci_get_type("global_other", "show_node_info") or "0"
+	local show_node_info = uci_get_type("global_other", "show_node_info", "0")
 	local nodes = {}
 	local default_nodes = {}
 	local other_nodes = {}
@@ -623,7 +596,7 @@ function get_node_remarks(n)
 				end
 				type_name = type_name .. " " .. protocol
 			end
-			remarks = trim("%s：[%s]" % {type_name, n.remarks})	
+			remarks = trim("%s：[%s]" % {type_name, n.remarks})
 		end
 	end
 	return remarks
@@ -669,7 +642,7 @@ function uci_get_type_id(id, config, default)
 	return value
 end
 
-function chmod_755(file)
+local function chmod_755(file)
 	if file and file ~= "" then
 		if not fs.access(file, "rwx", "rx", "rx") then
 			fs.chmod(file, 755)
@@ -710,13 +683,13 @@ function clone(org)
 			end
 		end
 	end
- 
+
 	local res = {}
 	copy(org, res)
 	return res
 end
 
-local function get_bin_version_cache(file, cmd)
+function get_bin_version_cache(file, cmd)
 	sys.call("mkdir -p /tmp/etc/passwall_tmp")
 	if fs.access(file) then
 		chmod_755(file)
@@ -748,7 +721,7 @@ function get_app_version(app_name, file)
 	return get_bin_version_cache(file, com[app_name].cmd_version)
 end
 
-function is_file(path)
+local function is_file(path)
 	if path and #path > 1 then
 		if sys.exec('[ -f "%s" ] && echo -n 1' % path) == "1" then
 			return true
@@ -757,7 +730,7 @@ function is_file(path)
 	return nil
 end
 
-function is_dir(path)
+local function is_dir(path)
 	if path and #path > 1 then
 		if sys.exec('[ -d "%s" ] && echo -n 1' % path) == "1" then
 			return true
@@ -766,7 +739,7 @@ function is_dir(path)
 	return nil
 end
 
-function get_final_dir(path)
+local function get_final_dir(path)
 	if is_dir(path) then
 		return path
 	else
@@ -774,7 +747,7 @@ function get_final_dir(path)
 	end
 end
 
-function get_free_space(dir)
+local function get_free_space(dir)
 	if dir == nil then dir = "/" end
 	if sys.call("df -k " .. dir .. " >/dev/null 2>&1") == 0 then
 		return tonumber(sys.exec("echo -n $(df -k " .. dir .. " | awk 'NR>1' | awk '{print $4}')"))
@@ -782,7 +755,7 @@ function get_free_space(dir)
 	return 0
 end
 
-function get_file_space(file)
+local function get_file_space(file)
 	if file == nil then return 0 end
 	if fs.access(file) then
 		return tonumber(sys.exec("echo -n $(du -k " .. file .. " | awk '{print $1}')"))
@@ -806,7 +779,7 @@ function table_join(t, s)
 	return str
 end
 
-function exec(cmd, args, writer, timeout)
+local function exec(cmd, args, writer, timeout)
 	local os = require "os"
 	local nixio = require "nixio"
 
@@ -849,6 +822,76 @@ function exec(cmd, args, writer, timeout)
 		nixio.stdout:close()
 		os.exit(1)
 	end
+end
+
+function compare_versions(ver1, comp, ver2)
+	local table = table
+
+	if not ver1 then ver1 = "" end
+	if not ver2 then ver2 = "" end
+
+	local av1 = util.split(ver1, "[%.%-]", nil, true)
+	local av2 = util.split(ver2, "[%.%-]", nil, true)
+
+	local max = table.getn(av1)
+	local n2 = table.getn(av2)
+	if (max < n2) then max = n2 end
+
+	for i = 1, max, 1 do
+		local s1 = tonumber(av1[i] or 0) or 0
+		local s2 = tonumber(av2[i] or 0) or 0
+
+		if comp == "~=" and (s1 ~= s2) then return true end
+		if (comp == "<" or comp == "<=") and (s1 < s2) then return true end
+		if (comp == ">" or comp == ">=") and (s1 > s2) then return true end
+		if (s1 ~= s2) then return false end
+	end
+
+	return not (comp == "<" or comp == ">")
+end
+
+local function auto_get_arch()
+	local arch = nixio.uname().machine or ""
+	if not OPENWRT_ARCH and fs.access("/usr/lib/os-release") then
+		OPENWRT_ARCH = sys.exec("echo -n $(grep 'OPENWRT_ARCH' /usr/lib/os-release | awk -F '[\\042\\047]' '{print $2}')")
+		OPENWRT_BOARD = sys.exec("echo -n $(grep 'OPENWRT_BOARD' /usr/lib/os-release | awk -F '[\\042\\047]' '{print $2}')")
+		if OPENWRT_ARCH == "" then OPENWRT_ARCH = nil end
+		if OPENWRT_BOARD == "" then OPENWRT_BOARD = nil end
+	end
+	if not DISTRIB_ARCH and fs.access("/etc/openwrt_release") then
+		DISTRIB_ARCH = sys.exec("echo -n $(grep 'DISTRIB_ARCH' /etc/openwrt_release | awk -F '[\\042\\047]' '{print $2}')")
+		if DISTRIB_ARCH == "" then DISTRIB_ARCH = nil end
+	end
+
+	if arch:match("^i[%d]86$") then
+		arch = "x86"
+	elseif arch:match("armv5") then  -- armv5l
+		arch = "armv5"
+	elseif arch:match("armv6") then
+		arch = "armv6"
+	elseif arch:match("armv7") then  -- armv7l
+		arch = "armv7"
+	end
+
+	if OPENWRT_ARCH or DISTRIB_ARCH then
+		if arch == "mips" then
+			if OPENWRT_ARCH and OPENWRT_ARCH:match("mipsel") == "mipsel"
+			or DISTRIB_ARCH and DISTRIB_ARCH:match("mipsel") == "mipsel" then
+				arch = "mipsel"
+			end
+		elseif arch == "armv7" then
+			if OPENWRT_ARCH and not OPENWRT_ARCH:match("vfp") and not OPENWRT_ARCH:match("neon")
+			or DISTRIB_ARCH and not DISTRIB_ARCH:match("vfp") and not DISTRIB_ARCH:match("neon") then
+				arch = "armv5"
+			end
+		end
+	end
+
+	if arch == "aarch64" and OPENWRT_BOARD and OPENWRT_BOARD:match("rockchip") ~= nil then
+		arch = "rockchip"
+	end
+
+	return trim(arch)
 end
 
 function parseURL(url_str)
@@ -906,70 +949,6 @@ function parseURL(url_str)
 	return res
 end
 
-function compare_versions(ver1, comp, ver2)
-	local table = table
-
-	if not ver1 then ver1 = "" end
-	if not ver2 then ver2 = "" end
-
-	local av1 = util.split(ver1, "[%.%-]", nil, true)
-	local av2 = util.split(ver2, "[%.%-]", nil, true)
-
-	local max = table.getn(av1)
-	local n2 = table.getn(av2)
-	if (max < n2) then max = n2 end
-
-	for i = 1, max, 1 do
-		local s1 = tonumber(av1[i] or 0) or 0
-		local s2 = tonumber(av2[i] or 0) or 0
-
-		if comp == "~=" and (s1 ~= s2) then return true end
-		if (comp == "<" or comp == "<=") and (s1 < s2) then return true end
-		if (comp == ">" or comp == ">=") and (s1 > s2) then return true end
-		if (s1 ~= s2) then return false end
-	end
-
-	return not (comp == "<" or comp == ">")
-end
-
-local function auto_get_arch()
-	local arch = nixio.uname().machine or ""
-	if not OPENWRT_ARCH and fs.access("/usr/lib/os-release") then
-		OPENWRT_ARCH = sys.exec("echo -n $(grep 'OPENWRT_ARCH' /usr/lib/os-release | awk -F '[\\042\\047]' '{print $2}')")
-		if OPENWRT_ARCH == "" then OPENWRT_ARCH = nil end
-	end
-	if not DISTRIB_ARCH and fs.access("/etc/openwrt_release") then
-		DISTRIB_ARCH = sys.exec("echo -n $(grep 'DISTRIB_ARCH' /etc/openwrt_release | awk -F '[\\042\\047]' '{print $2}')")
-		if DISTRIB_ARCH == "" then DISTRIB_ARCH = nil end
-	end
-
-	if arch:match("^i[%d]86$") then
-		arch = "x86"
-	elseif arch:match("armv5") then  -- armv5l
-		arch = "armv5"
-	elseif arch:match("armv6") then
-		arch = "armv6"
-	elseif arch:match("armv7") then  -- armv7l
-		arch = "armv7"
-	end
-
-	if OPENWRT_ARCH or DISTRIB_ARCH then
-		if arch == "mips" then
-			if OPENWRT_ARCH and OPENWRT_ARCH:match("mipsel") == "mipsel"
-			or DISTRIB_ARCH and DISTRIB_ARCH:match("mipsel") == "mipsel" then
-				arch = "mipsel"
-			end
-		elseif arch == "armv7" then
-			if OPENWRT_ARCH and not OPENWRT_ARCH:match("vfp") and not OPENWRT_ARCH:match("neon")
-			or DISTRIB_ARCH and not DISTRIB_ARCH:match("vfp") and not DISTRIB_ARCH:match("neon") then
-				arch = "armv5"
-			end
-		end
-	end
-
-	return trim(arch)
-end
-
 local default_file_tree = {
 	x86_64  = "amd64",
 	x86     = "386",
@@ -986,9 +965,9 @@ local default_file_tree = {
 	riscv64 = "riscv64"
 }
 
-function get_api_json(url)
+local function get_api_json(url)
 	local jsonc = require "luci.jsonc"
-	local return_code, content = curl_logic(url, nil, curl_args)
+	local return_code, content = curl_auto(url, nil, curl_args)
 	if return_code ~= 0 or content == "" then return {} end
 	return jsonc.parse(content) or {}
 end
@@ -1052,7 +1031,7 @@ function to_check(arch, app_name)
 			remote_version = remote_version
 		}
 	end
-]]
+]]--
 	local asset = {}
 	for _, v in ipairs(json.assets) do
 		if v.name and v.name:match(match_file_name) then
@@ -1105,7 +1084,7 @@ function to_download(app_name, url, size)
 	local _curl_args = clone(curl_args)
 	table.insert(_curl_args, "--speed-limit 51200 --speed-time 15 --max-time 300")
 
-	local return_code, result = curl_logic(url, tmp_file, _curl_args)
+	local return_code, result = curl_auto(url, tmp_file, _curl_args)
 	result = return_code == 0
 
 	if not result then
@@ -1204,7 +1183,7 @@ function to_move(app_name,file)
 		sys.call(cmd_rm_tmp)
 		return {
 			code = 1,
-			error = i18n.translate("The client file is not suitable for current device.")..app_name.."__"..bin_path
+			error = i18n.translate("The client file is not suitable for current device.") .. app_name .. "__" .. bin_path
 		}
 	end
 
@@ -1286,81 +1265,6 @@ function to_check_self()
 	}
 end
 
-function cacheFileCompareToLogic(file, str)
-	local result = nil
-	if file and str then
-		local file_str = ""
-		if fs.access(file) then
-			file_str = sys.exec("cat " .. file)
-		end
-
-		if file_str ~= str then
-			sys.call("rm -f " .. file)
-			result = false
-		else
-			result = true
-		end
-
-		local f_out = io.open(file, "w")
-		if f_out then
-			f_out:write(str)
-			f_out:close()
-		end
-	end
-	return result
-end
-
-function is_js_luci()
-	return sys.call('[ -f "/www/luci-static/resources/uci.js" ]') == 0
-end
-
-function set_apply_on_parse(map)
-	if not map then
-		return
-	end
-	local lang = uci:get("luci", "main", "lang") or "auto"
-	if lang == "auto" then
-		local http = require "luci.http"
-		local aclang = http.getenv("HTTP_ACCEPT_LANGUAGE") or ""
-		for lpat in aclang:gmatch("[%w-]+") do
-			lpat = lpat and lpat:gsub("-", "_")
-			if uci:get("luci", "languages", lpat) then
-				lang = lpat
-				break
-			end
-			lpat = lpat and lpat:lower()
-			if uci:get("luci", "languages", lpat) then
-				lang = lpat
-				break
-			end
-		end
-		if lang ~= "auto" then
-			sh_uci_set(appname, "@global[0]", "auto_lang", lang, true)
-		end
-	end
-	if is_js_luci() == true then
-		local hide_popup_box = nil
-		if hide_popup_box == true then
-			map.apply_on_parse = false
-			map.on_after_apply = function(self)
-				if self.redirect then
-					os.execute("sleep 1")
-					luci.http.redirect(self.redirect)
-				end
-			end
-		else
-			apply_redirect(map)
-			local old = map.on_after_save
-			map.on_after_save = function(self)
-				if old then old(self) end
-				map:set("@global[0]", "timestamp", os.time())
-			end
-			local cbi = require "luci.cbi"
-			map:append(cbi.Template(appname .. "/cbi/optimize_cbi_ui"))
-		end
-	end
-end
-
 function luci_types(id, m, s, type_name, option_prefix)
 	local rewrite_option_table = {}
 	for key, value in pairs(s.fields) do
@@ -1375,7 +1279,7 @@ function luci_types(id, m, s, type_name, option_prefix)
 				end
 
 				s.fields[key].cfgvalue = function(self, section)
-					-- Add a custom `custom_cfgvalue` attribute. If a custom `custom_cfgvalue` function exists, the custom `cfgvalue` logic will be used.
+					-- 添加自定义 custom_cfgvalue 属性，如果有自定义的 custom_cfgvalue 函数，则使用自定义的 cfgvalue 逻辑
 					if self.custom_cfgvalue then
 						return self:custom_cfgvalue(section)
 					else
@@ -1390,7 +1294,7 @@ function luci_types(id, m, s, type_name, option_prefix)
 				end
 				s.fields[key].write = function(self, section, value)
 					if s.fields["type"]:formvalue(id) == type_name then
-						-- Add a custom `custom_write` attribute; if a custom `custom_write` function exists, then use the custom write logic.
+						-- 添加自定义 custom_write 属性，如果有自定义的 custom_write 函数，则使用自定义的 write 逻辑
 						if self.custom_write then
 							self:custom_write(section, value)
 						else
@@ -1406,7 +1310,7 @@ function luci_types(id, m, s, type_name, option_prefix)
 				end
 				s.fields[key].remove = function(self, section)
 					if s.fields["type"]:formvalue(id) == type_name then
-						-- Add a custom `custom_remove` attribute; if a custom `custom_remove` function exists, use the custom remove logic.
+						-- 添加自定义 custom_remove 属性，如果有自定义的 custom_remove 函数，则使用自定义的 remove 逻辑
 						if self.custom_remove then
 							self:custom_remove(section)
 						else
@@ -1433,6 +1337,57 @@ function luci_types(id, m, s, type_name, option_prefix)
 		end
 	end
 end
+
+function get_std_domain(domain)
+	domain = trim(domain)
+	if domain == "" then return "" end
+	-- 含 # → ""
+	for i = 1, #domain do
+		if domain:byte(i) == 35 then return "" end -- '#'
+	end
+	local len = #domain
+	local si, ei = 1, len
+	-- 去前缀 '.'
+	while si <= len and domain:byte(si) == 46 do si = si + 1 end
+	-- 去后缀 '.'
+	while ei >= si and domain:byte(ei) == 46 do ei = ei - 1 end
+	if si > ei then return "" end
+	domain = domain:sub(si, ei)
+	len = #domain
+	-- 是否有 '*'
+	local star = false
+	for i = 1, len do
+		if domain:byte(i) == 42 then star = true break end
+	end
+	if not star then return domain end
+	-- 切割 label
+	local parts, pstart = {}, 1
+	for i = 1, len + 1 do
+		local b = (i <= len) and domain:byte(i) or 46 -- '.' 作为结束
+		if b == 46 then
+			parts[#parts + 1] = domain:sub(pstart, i - 1)
+			pstart = i + 1
+		end
+	end
+	-- 从右向左找含 '*' ,并删除包含 '*' 的部分及其左边部分
+	for i = #parts, 1, -1 do
+		local s = parts[i]
+		local has = false
+		for j = 1, #s do
+			if s:byte(j) == 42 then has = true break end
+		end
+		if has then
+			if i == #parts then return "" end
+			local out = parts[i + 1]
+			for k = i + 2, #parts do
+				out = out .. "." .. parts[k]
+			end
+			return out
+		end
+	end
+	return domain
+end
+
 function format_go_time(input)
 	input = input and trim(input)
 	local N = 0
@@ -1461,6 +1416,21 @@ function format_go_time(input)
 	if m > 0 then result = result .. m .. "m" end
 	if s > 0 or result == "" then result = result .. s .. "s" end
 	return result
+end
+
+function set_apply_on_parse(map)
+	if not map then return end
+	if is_js_luci() then
+		apply_redirect(map)
+		local old = map.on_after_save
+		map.on_after_save = function(self)
+			if old then old(self) end
+			map:set("@global[0]", "timestamp", os.time())
+		end
+		-- 优化页面
+		local cbi = require "luci.cbi"
+		map:append(cbi.Template(appname .. "/cbi/optimize_cbi_ui"))
+	end
 end
 
 function apply_redirect(m)
@@ -1550,4 +1520,14 @@ function get_core(field, candidates)
 		if c[1] then return c[2] end
 	end
 	return nil
+end
+
+function cleanEmptyTables(t)
+	if type(t) ~= "table" then return nil end
+	for k, v in pairs(t) do
+		if type(v) == "table" then
+			t[k] = cleanEmptyTables(v)
+		end
+	end
+	return next(t) and t or nil
 end

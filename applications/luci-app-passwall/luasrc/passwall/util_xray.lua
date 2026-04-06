@@ -8,21 +8,6 @@ local fs = api.fs
 
 local xray_version = api.get_app_version("xray")
 
-local function get_noise_packets()
-	local noises = {}
-	uci:foreach(appname, "xray_noise_packets", function(n)
-		local noise = (n.enabled == "1") and {
-			type = n.type,
-			packet = n.packet,
-			delay = string.find(n.delay, "-") and n.delay or tonumber(n.delay),
-			applyTo = n.applyTo
-		} or nil
-		table.insert(noises, noise)
-	end)
-	if #noises == 0 then noises = nil end
-	return noises
-end
-
 local function get_domain_excluded()
 	local path = string.format("/usr/share/%s/rules/domains_excluded", appname)
 	local content = fs.readfile(path)
@@ -150,8 +135,7 @@ function gen_outbound(flag, node, tag, proxy_table)
 				sockopt = {
 					mark = 255,
 					tcpFastOpen = (node.tcp_fast_open == "1") and true or nil,
-					tcpMptcp = (node.tcpMptcp == "1") and true or nil,
-					dialerProxy = (fragment or noise) and "dialerproxy" or nil
+					tcpMptcp = (node.tcpMptcp == "1") and true or nil
 				},
 				network = node.transport,
 				security = node.stream_security,
@@ -173,7 +157,7 @@ function gen_outbound(flag, node, tag, proxy_table)
 								return node.tls_CertByName
 							end)(),
 					echConfigList = (node.ech == "1") and node.ech_config or nil,
-					echForceQuery = (node.ech == "1") and (node.ech_ForceQuery or "none") or nil
+					echForceQuery = (node.ech == "1") and (node.ech_ForceQuery or "full") or nil
 				} or nil,
 				realitySettings = (node.stream_security == "reality") and {
 					serverName = node.tls_serverName,
@@ -260,29 +244,12 @@ function gen_outbound(flag, node, tag, proxy_table)
 				} or nil,
 				hysteriaSettings = (node.transport == "hysteria") and {
 					version = 2,
-					auth = node.hysteria2_auth_password,
-					up = (node.hysteria2_up_mbps and tonumber(node.hysteria2_up_mbps)) and tonumber(node.hysteria2_up_mbps) .. "mbps" or nil,
-					down = (node.hysteria2_down_mbps and tonumber(node.hysteria2_down_mbps)) and tonumber(node.hysteria2_down_mbps) .. "mbps" or nil,
-					udphop = (node.hysteria2_hop) and {
-						port = string.gsub(node.hysteria2_hop, ":", "-"),
-						interval = (function()
-								local v = tonumber((node.hysteria2_hop_interval or "30s"):match("^%d+"))
-								return (v and v >= 5) and v or 30
-							    end)()
-					} or nil,
-					maxIdleTimeout = (function()
-						local timeoutStr = tostring(node.hysteria2_idle_timeout or "")
-						local timeout = tonumber(timeoutStr:match("^%d+"))
-						if timeout and timeout >= 4 and timeout <= 120 then
-							return timeout
-						end
-						return 30
-					end)(),
-					disablePathMTUDiscovery = (node.hysteria2_disable_mtu_discovery) and true or false
+					auth = node.hysteria2_auth_password
 				} or nil,
 				finalmask = (function()
-					local finalmask
-					if node.transport == "mkcp" then
+					local finalmask = {}
+					local TP = node.transport
+					if TP == "mkcp" then
 						local map = {none = "none", srtp = "header-srtp", utp = "header-utp", ["wechat-video"] = "header-wechat",
 							dtls = "header-dtls", wireguard = "header-wireguard", dns = "header-dns"}
 						local udp = {}
@@ -298,16 +265,47 @@ function gen_outbound(flag, node, tag, proxy_table)
 							c.settings = { password = node.mkcp_seed }
 						end
 						udp[#udp+1] = c
-						finalmask = { udp = udp }
-					elseif node.transport == "hysteria" and node.hysteria2_obfs_type and node.hysteria2_obfs_type ~= "" then
-						finalmask = {
-							udp = {{
+						finalmask.udp = udp
+					elseif TP == "hysteria" then
+						if node.hysteria2_obfs_type and node.hysteria2_obfs_type ~= "" then
+							finalmask.udp = {{
 								type = node.hysteria2_obfs_type,
 								settings = node.hysteria2_obfs_password and {
 									password = node.hysteria2_obfs_password
 								} or nil
 							}}
+						end
+						local up = tonumber(node.hysteria2_up_mbps) or 0
+						local down = tonumber(node.hysteria2_down_mbps) or 0
+						finalmask.quicParams = {
+							congestion = (up <= 0 and down <= 0) and "bbr" or "brutal",
+							brutalUp = up > 0 and (up .. "mbps") or nil,
+							brutalDown = down > 0 and (down .. "mbps") or nil,
+							udpHop = (node.hysteria2_hop) and {
+								ports = string.gsub(node.hysteria2_hop, ":", "-"),
+								interval = (function(v)
+									v = tonumber((v or "30s"):match("^%d+"))
+									return (v and v >= 5) and v or 30
+								end)(node.hysteria2_hop_interval)
+							} or nil,
+							maxIdleTimeout = (function(t)
+								t = tonumber(tostring(t or "30"):match("^%d+"))
+								return (t and t >= 4 and t <= 120) and t or 30
+							end)(node.hysteria2_idle_timeout),
+							keepAlivePeriod = (function(t)
+								t = tonumber(tostring(t or "0"):match("^%d+"))
+								return (t and t >= 2 and t <= 60) and t or nil
+							end)(node.hysteria2_keep_alive_period),
+							disablePathMTUDiscovery = tonumber(node.hysteria2_disable_mtu_discovery) == 1
 						}
+					end
+					if fragment and fragment_table and ({raw=1, ws=1, httpupgrade=1, grpc=1, xhttp=1})[TP] then
+						finalmask.tcp = finalmask.tcp or {}
+						finalmask.tcp[#finalmask.tcp+1] = api.clone(fragment_table)
+					end
+					if noise and noise_table and (TP == "mkcp" or (TP == "xhttp" and node.alpn == "h3")) then
+						finalmask.udp = finalmask.udp or {}
+						finalmask.udp[#finalmask.udp+1] = api.clone(noise_table)
 					end
 					if node.finalmask and node.finalmask ~= "" then
 						local ok, fm = pcall(jsonc.parse, api.base64Decode(node.finalmask))
@@ -456,6 +454,13 @@ function gen_config_server(node)
 				clients = clients
 			}
 		end
+	elseif node.protocol == "hysteria2" then
+		settings = {
+			version = 2,
+			clients = node.hysteria2_auth_password and {
+				{ auth = node.hysteria2_auth_password }
+			}
+		}
 	elseif node.protocol == "dokodemo-door" then
 		settings = {
 			network = node.d_protocol,
@@ -533,6 +538,12 @@ function gen_config_server(node)
 		end
 	end
 
+	if node.protocol == "hysteria2" then
+		node.protocol = "hysteria"
+		node.transport = "hysteria"
+		node.tls = "1"
+	end
+
 	local config = {
 		log = {
 			-- error = "/tmp/etc/passwall_server/log/" .. user[".name"] .. ".log",
@@ -601,8 +612,11 @@ function gen_config_server(node)
 						maxUploadSize = node.xhttp_maxuploadsize,
 						maxConcurrentUploads = node.xhttp_maxconcurrentuploads
 					} or nil,
+					hysteriaSettings = (node.transport == "hysteria") and {
+						version = 2
+					} or nil,
 					finalmask = (function()
-						local finalmask
+						local finalmask = {}
 						if node.transport == "mkcp" then
 							local map = {none = "none", srtp = "header-srtp", utp = "header-utp", ["wechat-video"] = "header-wechat",
 								dtls = "header-dtls", wireguard = "header-wireguard", dns = "header-dns"}
@@ -619,7 +633,24 @@ function gen_config_server(node)
 								c.settings = { password = node.mkcp_seed }
 							end
 							udp[#udp+1] = c
-							finalmask = { udp = udp }
+							finalmask.udp = udp
+						elseif node.transport == "hysteria" then
+							if node.hysteria2_obfs_type and node.hysteria2_obfs_type ~= "" then
+								finalmask.udp = {{
+									type = node.hysteria2_obfs_type,
+									settings = node.hysteria2_obfs_password and {
+										password = node.hysteria2_obfs_password
+									} or nil
+								}}
+							end
+							local ignore = tonumber(node.hysteria2_ignore_client_bandwidth) == 1
+							local up = (not ignore) and tonumber(node.hysteria2_up_mbps) or 0
+							local down = (not ignore) and tonumber(node.hysteria2_down_mbps) or 0
+							finalmask.quicParams = {
+								congestion = (up <= 0 and down <= 0) and "bbr" or "brutal",
+								brutalUp = up > 0 and (up .. "mbps") or nil,
+								brutalDown = down > 0 and (down .. "mbps") or nil
+							}
 						end
 						if node.finalmask and node.finalmask ~= "" then
 							local ok, fm = pcall(jsonc.parse, api.base64Decode(node.finalmask))
@@ -715,12 +746,45 @@ function gen_config(var)
 	local fakedns = nil
 	local routing = nil
 	local observatory = nil
+	local burstObservatory = nil
 	local strategy = nil
 	local inbounds = {}
 	local outbounds = {}
 	local COMMON = {}
 
 	local xray_settings = uci:get_all(appname, "@global_xray[0]") or {}
+
+	if xray_settings.fragment == "1" then
+		local delay = xray_settings.fragment_delay
+		fragment_table = {
+			type = "fragment",
+			settings = {
+				packets = xray_settings.fragment_packets,
+				length = xray_settings.fragment_length,
+				delay = delay and (delay:find("-", 1, true) and delay or tonumber(delay)) or nil,
+				maxSplit = xray_settings.fragment_maxSplit
+			}
+		}
+	end
+
+	if xray_settings.noise == "1" then
+		local noises = {}
+		uci:foreach(appname, "xray_noise_packets", function(n)
+			if n.enabled == "1" then
+				local noise = {
+					rand = (n.type == "rand" and n.packet) and (n.packet:find("-", 1, true) and n.packet or tonumber(n.packet)) or nil,
+					type = (n.type ~= "rand") and n.type or nil,
+					packet = (n.type ~= "rand") and n.packet or nil,
+					delay = n.delay and (n.delay:find("-", 1, true) and n.delay or tonumber(n.delay)) or nil
+				}
+				table.insert(noises, noise)
+			end
+		end)
+		noise_table = #noises > 0 and {
+			type = "noise",
+			settings = { reset = 0, noise = noises }
+		} or nil
+	end
 
 	if node_id then
 		local node = uci:get_all(appname, node_id)
@@ -886,7 +950,7 @@ function gen_config(var)
 					end
 				end
 				if is_new_blc_node then
-					local outboundTag = gen_outbound_get_tag(flag, blc_node_id, blc_node_tag, { fragment = xray_settings.fragment == "1" or nil, noise = xray_settings.record_fragment == "1" or nil, run_socks_instance = not no_run })
+					local outboundTag = gen_outbound_get_tag(flag, blc_node_id, blc_node_tag, { fragment = xray_settings.fragment == "1" or nil, noise = xray_settings.noise == "1" or nil, run_socks_instance = not no_run })
 					if outboundTag then
 						valid_nodes[#valid_nodes + 1] = outboundTag
 					end
@@ -911,7 +975,7 @@ function gen_config(var)
 					local fallback_node = get_node_by_id(fallback_node_id)
 					if fallback_node then
 						if fallback_node.protocol ~= "_balancing" then
-							local outboundTag = gen_outbound_get_tag(flag, fallback_node, fallback_node_id, { fragment = xray_settings.fragment == "1" or nil, noise = xray_settings.record_fragment == "1" or nil, run_socks_instance = not no_run })
+							local outboundTag = gen_outbound_get_tag(flag, fallback_node, fallback_node_id, { fragment = xray_settings.fragment == "1" or nil, noise = xray_settings.noise == "1" or nil, run_socks_instance = not no_run })
 							if outboundTag then
 								fallback_node_tag = outboundTag
 							end
@@ -940,19 +1004,31 @@ function gen_config(var)
 				fallbackTag = fallback_node_tag,
 				strategy = strategy
 			})
-			if not observatory and (_node.balancingStrategy == "leastPing" or _node.balancingStrategy == "leastLoad" or fallback_node_tag) then
+			if _node.balancingStrategy == "leastPing" or _node.balancingStrategy == "leastLoad" or fallback_node_tag then
 				local t = api.format_go_time(_node.probeInterval)
 				if t == "0s" then
 					t = "60s"
 				elseif not t:find("[hm]") and tonumber(t:match("%d+")) < 10 then
 					t = "10s"
 				end
-				observatory = {
-					subjectSelector = { "blc-" },
-					probeUrl = _node.useCustomProbeUrl and _node.probeUrl or "https://www.google.com/generate_204",
-					probeInterval = t,
-					enableConcurrency = true
-				}
+				if _node.balancingStrategy == "leastLoad" then
+					burstObservatory = burstObservatory or {
+						subjectSelector = { "blc-" },
+						pingConfig = {
+							destination = _node.useCustomProbeUrl and _node.probeUrl or nil,
+							interval = t,
+							sampling = 3,
+							timeout = "5s"
+						}
+					}
+				else
+					observatory = observatory or {
+						subjectSelector = { "blc-" },
+						probeUrl = _node.useCustomProbeUrl and _node.probeUrl or nil,
+						probeInterval = t,
+						enableConcurrency = true
+					}
+				end
 			end
 			local loopback_outbound = gen_loopback(loopback_tag, loopback_dst)
 			local inbound_tag = loopback_outbound.settings.inboundTag
@@ -1428,7 +1504,7 @@ function gen_config(var)
 			elseif remote_dns_query_strategy == "UseIPv6" then
 				table.insert(fakedns, fakedns6)
 			end
-			if remote_dns_fake and inner_fakedns == "0" then
+			if remote_dns_fake and inner_fakedns ~= "1" then
 				table.insert(dns.servers, 1, _remote_fakedns)
 			end
 		end
@@ -1607,7 +1683,8 @@ function gen_config(var)
 			-- 传出连接
 			outbounds = outbounds,
 			-- 连接观测
-			observatory = observatory,
+			observatory = (not burstObservatory) and observatory or nil,
+			burstObservatory = burstObservatory,
 			-- 路由
 			routing = routing,
 			-- 本地策略
@@ -1629,28 +1706,6 @@ function gen_config(var)
 				-- }
 			}
 		}
-
-		if xray_settings.fragment == "1" or xray_settings.noise == "1" then
-			table.insert(outbounds, {
-				protocol = "freedom",
-				tag = "dialerproxy",
-				settings = {
-					domainStrategy = (direct_dns_query_strategy and direct_dns_query_strategy ~= "") and direct_dns_query_strategy or "UseIP",
-					fragment = (xray_settings.fragment == "1") and {
-						packets = (xray_settings.fragment_packets and xray_settings.fragment_packets ~= "") and xray_settings.fragment_packets,
-						length = (xray_settings.fragment_length and xray_settings.fragment_length ~= "") and xray_settings.fragment_length,
-						interval = (xray_settings.fragment_interval and xray_settings.fragment_interval ~= "") and xray_settings.fragment_interval,
-						maxSplit = (xray_settings.fragment_maxSplit and xray_settings.fragment_maxSplit ~= "") and xray_settings.fragment_maxSplit
-					} or nil,
-					noises = (xray_settings.noise == "1") and get_noise_packets() or nil
-				},
-				streamSettings = {
-					sockopt = {
-						mark = 255
-					}
-				}
-			})
-		end
 
 		local direct_outbound = {
 			protocol = "freedom",

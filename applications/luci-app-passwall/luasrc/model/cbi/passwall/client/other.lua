@@ -90,6 +90,13 @@ o:value("disable", translate("No patterns are used"))
 o:value("443", translate("QUIC"))
 o.validate = port_validate
 
+---- TCP Redir Ports
+o = s:option(Value, "tcp_redir_ports", translate("TCP Redir Ports"))
+o:value("1:65535", translate("All"))
+o:value("22,25,53,80,143,443,465,587,853,873,993,995,5222,8080,8443,9418", translate("Common Use"))
+o:value("80,443", translate("Only Web"))
+o.default = o.keylist[2]
+o.validate = port_validate
 
 ---- UDP Redir Ports
 o = s:option(Value, "udp_redir_ports", translate("UDP Redir Ports"))
@@ -173,14 +180,17 @@ if has_xray then
 	o:depends("fragment", true)
 
 	o = s_xray:option(Value, "fragment_length", translate("Fragment Length"), translate("Fragmented packet length (byte)"))
+	o.datatype = "or(uinteger,portrange)"
 	o.default = "100-200"
 	o:depends("fragment", true)
 
-	o = s_xray:option(Value, "fragment_interval", translate("Fragment Interval"), translate("Fragmentation interval (ms)"))
+	o = s_xray:option(Value, "fragment_delay", translate("Fragment Delay"), translate("Fragmentation interval (ms)"))
+	o.datatype = "or(uinteger,portrange)"
 	o.default = "10-20"
 	o:depends("fragment", true)
 
 	o = s_xray:option(Value, "fragment_maxSplit", translate("Max Split"), translate("Limit the maximum number of splits."))
+	o.datatype = "or(uinteger,portrange)"
 	o.default = "100-200"
 	o:depends("fragment", true)
 
@@ -226,22 +236,18 @@ if has_xray then
 
 	o = s_xray_noise:option(ListValue, "type", translate("Type"))
 	o:value("rand", "rand")
+	o:value("array", "array")
 	o:value("str", "str")
 	o:value("hex", "hex")
 	o:value("base64", "base64")
 
-	o = s_xray_noise:option(Value, "packet", translate("Packet"))
+	o = s_xray_noise:option(Value, "packet", translate("Packet | Rand Length"))
 	o.datatype = "minlength(1)"
 	o.rmempty = false
 
 	o = s_xray_noise:option(Value, "delay", translate("Delay (ms)"))
 	o.datatype = "or(uinteger,portrange)"
 	o.rmempty = false
-
-	o = s_xray_noise:option(ListValue, "applyTo", translate("IP Type"))
-	o:value("ip", "ALL")
-	o:value("ipv4", "IPv4")
-	o:value("ipv6", "IPv6")
 end
 
 if has_singbox then
