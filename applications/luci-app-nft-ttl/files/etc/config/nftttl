@@ -1,0 +1,18 @@
+
+config ttl 'ttl'
+	option enabled '1'
+	option value '64'
+	option lan_ifaces 'auto'
+	option wan_ifaces 'auto'
+	option use_ingress '0'
+	option normalize_input '1'
+	option normalize_lan_output '1'
+	option ipv6_lan_diag '1'
+	option client_ipv6_assist '1'
+	option ipv6_flow_safe '1'
+	option ipv4 '1'
+	option ipv6 'auto'
+	option persist_file '0'
+	list lan_extra_ifaces 'lan1 lan2 lan3 lan4'
+	list lan_extra_ifaces 'wan'
+

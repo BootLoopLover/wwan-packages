@@ -1,0 +1,9 @@
+This directory is created by luci-app-nft-ttl so OpenWrt/firewall4 systems that expect
+/etc/nftables.d do not fail when adding nft include files.
+
+The service generates dynamic rules at:
+  /tmp/nftttl_rules.nft
+and, for debug/backup when persist_file=0:
+  /etc/nftables.d/nftttl.generated.disabled
+
+Do not manually edit nftttl.generated.disabled. Change /etc/config/nftttl or the LuCI page instead.

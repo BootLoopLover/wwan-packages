@@ -1,0 +1,38 @@
+#!/bin/sh
+# Reload nft TTL/HopLimit rules when relevant interfaces change.
+# v2.1: debounced reload. IPv6/WAN6 can flap during renew; wait a few seconds
+# so we do not delete/recreate rules while RA/DHCPv6/default route is half-ready.
+
+case "$ACTION" in
+	ifup|ifdown|ifupdate) ;;
+	*) exit 0 ;;
+esac
+
+_should_reload=0
+case "$INTERFACE" in
+	lan|wan|wan6|wwan|wwan_4|wwan_6|cellular|modem*|mob*)
+		_should_reload=1
+	;;
+	*)
+		if uci -q show firewall | grep -q "network=.*\b$INTERFACE\b"; then
+			_should_reload=1
+		fi
+	;;
+esac
+
+[ "$_should_reload" = "1" ] || exit 0
+
+(
+	# simple debounce lock for bursty netifd events
+	lockdir=/tmp/nftttl.reload.lock
+	if mkdir "$lockdir" 2>/dev/null; then
+		trap 'rmdir "$lockdir" 2>/dev/null' EXIT
+		sleep 4
+		/etc/init.d/nft-custom-ttl reload >/dev/null 2>&1
+	else
+		# another hotplug event is already waiting to reload
+		exit 0
+	fi
+) &
+
+exit 0

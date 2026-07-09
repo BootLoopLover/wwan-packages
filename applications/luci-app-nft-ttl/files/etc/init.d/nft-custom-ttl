@@ -1,0 +1,436 @@
+#!/bin/sh /etc/rc.common
+# NFT TTL/HopLimit Controller for OpenWrt firewall4/nftables
+# v2.1: smooth IPv6 re-enable flow; DHCPv6/RA/ND safe HopLimit rules and debounced hotplug reload.
+
+START=99
+USE_PROCD=1
+
+PROG=/usr/sbin/nft
+TABLE="ttlcontrol"
+TMP_FILE="/tmp/nftttl_rules.nft"
+PERSIST_DIR="/etc/nftables.d"
+PERSIST_FILE="/etc/nftables.d/nftttl.generated.disabled"
+LOG_TAG="nftttl"
+
+_uci_get() { uci -q get "$1" 2>/dev/null; }
+
+_uci_get_words() {
+	# Read normal UCI option or list option as a whitespace-separated word list.
+	# Needed because LuCI MultiValue may save selected interfaces as list entries.
+	local pkg="$1" sec="$2" opt="$3" v
+	v="$(uci -q get "$pkg.$sec.$opt" 2>/dev/null)"
+	[ -n "$v" ] && { echo "$v"; return 0; }
+	uci -q show "$pkg.$sec" 2>/dev/null | sed -n "s/^$pkg\.$sec\.$opt='\([^']*\)'.*$/\1/p" | xargs echo
+}
+
+_cfg_enabled() {
+	local e
+	e="$(_uci_get nftttl.ttl.enabled)"
+	[ -n "$e" ] || e="$(_uci_get nftttl.settings.enable)"
+	echo "${e:-0}"
+}
+
+_cfg_value() {
+	local v
+	v="$(_uci_get nftttl.ttl.value)"
+	[ -n "$v" ] || v="$(_uci_get nftttl.settings.ttl_value)"
+	echo "${v:-64}"
+}
+
+_cfg_lan_ifaces() { _uci_get_words nftttl ttl lan_ifaces; }
+_cfg_wan_ifaces() { _uci_get_words nftttl ttl wan_ifaces; }
+_cfg_ingress_plus_one() { echo "$(_uci_get nftttl.ttl.ingress_plus_one)"; }
+_cfg_persist_file() { echo "$(_uci_get nftttl.ttl.persist_file)"; }
+_cfg_use_ingress() { echo "$(_uci_get nftttl.ttl.use_ingress)"; }
+_cfg_ipv4() { echo "$(_uci_get nftttl.ttl.ipv4)"; }
+_cfg_ipv6() { echo "$(_uci_get nftttl.ttl.ipv6)"; }
+_cfg_normalize_input() { echo "$(_uci_get nftttl.ttl.normalize_input)"; }
+_cfg_normalize_lan_output() { echo "$(_uci_get nftttl.ttl.normalize_lan_output)"; }
+_cfg_lan_extra_ifaces() { _uci_get_words nftttl ttl lan_extra_ifaces; }
+_cfg_ipv6_lan_diag() { echo "$(_uci_get nftttl.ttl.ipv6_lan_diag)"; }
+_cfg_client_ipv6_assist() { echo "$(_uci_get nftttl.ttl.client_ipv6_assist)"; }
+_cfg_ipv6_flow_safe() { echo "$(_uci_get nftttl.ttl.ipv6_flow_safe)"; }
+
+_log_action() {
+	local msg="$1"
+	logger -t "$LOG_TAG" "$msg"
+	printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> /tmp/ttl_action.log 2>/dev/null
+}
+
+_dedupe_words() {
+	local out="" w
+	for w in $*; do
+		[ -n "$w" ] || continue
+		case " $out " in *" $w "*) ;; *) out="$out $w" ;; esac
+	done
+	echo "$out"
+}
+
+_strip_auto_words() {
+	local out="" w
+	for w in $*; do
+		[ "$w" = "auto" ] && continue
+		out="$out $w"
+	done
+	_dedupe_words $out
+}
+
+_filter_existing_devs() {
+	local out="" d
+	for d in $*; do
+		[ -e "/sys/class/net/$d" ] && out="$out $d"
+	done
+	_dedupe_words $out
+}
+
+_zone_section_by_name() {
+	local zname="$1"
+	uci -q show firewall 2>/dev/null | sed -n "s/^\(firewall\.[^=]*\)\.name='$zname'.*$/\1/p" | head -n1
+}
+
+_zone_networks() {
+	local zsec="$1"
+	[ -n "$zsec" ] || return 0
+	uci -q show firewall 2>/dev/null | sed -n "s/^$zsec\.network='\([^']*\)'.*$/\1/p"
+}
+
+_iface_l3dev() {
+	local ifc="$1" d
+	d="$(ubus call network.interface."$ifc" status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)"
+	[ -n "$d" ] || d="$(ubus call network.interface."$ifc" status 2>/dev/null | jsonfilter -e '@.device' 2>/dev/null)"
+	[ -n "$d" ] || d="$(_uci_get network.$ifc.device)"
+	[ -n "$d" ] || d="$(_uci_get network.$ifc.ifname)"
+	echo "$d"
+}
+
+_detect_zone_devs() {
+	local zname="$1" zsec nets devs="" n d
+	zsec="$(_zone_section_by_name "$zname")"
+	nets="$(_zone_networks "$zsec")"
+	for n in $nets; do
+		d="$(_iface_l3dev "$n")"
+		[ -n "$d" ] && devs="$devs $d"
+	done
+	_dedupe_words $devs
+}
+
+_default_route_devs() {
+	local d4 d6 out=""
+	d4="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+	d6="$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+	[ -n "$d4" ] && out="$out $d4"
+	[ -n "$d6" ] && out="$out $d6"
+	_dedupe_words $out
+}
+
+_ipv6_ready() {
+	# Only enable IPv6 HopLimit rules after IPv6 is actually up.
+	# This avoids breaking DHCPv6/RA bring-up on modems where wan6 appears late.
+	ip -6 route show default 2>/dev/null | grep -q ' dev ' && return 0
+	ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 ' && return 0
+	return 1
+}
+
+
+_bridge_ports() {
+	local br="$1" out="" p
+	[ -n "$br" ] || return 0
+	# DSA/bridge: /sys/class/net/br-lan/brif/lan1 etc.
+	if [ -d "/sys/class/net/$br/brif" ]; then
+		for p in /sys/class/net/$br/brif/*; do
+			[ -e "$p" ] && out="$out ${p##*/}"
+		done
+	fi
+	# Fallback for systems with bridge command installed.
+	if command -v bridge >/dev/null 2>&1; then
+		out="$out $(bridge link 2>/dev/null | awk -v b="$br" 'index($0,"master " b){for(i=1;i<=NF;i++) if($i ~ /^[A-Za-z0-9_.:-]+:$/){gsub(":","",$i); print $i}}')"
+	fi
+	_dedupe_words $out
+}
+
+_all_lan_bridge_members() {
+	local dev out=""
+	for dev in $*; do
+		out="$out $(_bridge_ports "$dev")"
+	done
+	_dedupe_words $out
+}
+
+_common_lan_ports() {
+	local out="" d
+	# Best-effort catch for DSA wired LAN ports when oifname is a physical port instead of br-lan.
+	for d in /sys/class/net/lan* /sys/class/net/eth*; do
+		[ -e "$d" ] || continue
+		d="${d##*/}"
+		case "$d" in lo|eth0|wwan*|usb*|ppp*|rmnet*|qmimux*|wwan0_1) continue ;; esac
+		# Skip if used as detected WAN default route.
+		case " $(_default_route_devs) " in *" $d "*) continue ;; esac
+		out="$out $d"
+	done
+	_dedupe_words $out
+}
+
+_auto_lan_devs() {
+	local d members extras common
+	d="$(_detect_zone_devs lan)"
+	[ -n "$d" ] || d="br-lan"
+	members="$(_all_lan_bridge_members $d)"
+	extras="$(_cfg_lan_extra_ifaces)"
+	common="$(_common_lan_ports)"
+	# Include bridge + member ports. This fixes cases where WiFi goes through br-lan but wired LAN egress appears as lan1/eth1.
+	_dedupe_words $d $members $extras $common
+}
+
+_auto_wan_devs() {
+	local d
+	# Include both wan and wan6 zones for IPv4 + IPv6 bypass.
+	d="$(_detect_zone_devs wan) $(_detect_zone_devs wan6)"
+	d="$(_dedupe_words $d)"
+	[ -n "$d" ] || d="$(_default_route_devs)"
+	_dedupe_words $d
+}
+
+_ifname_elems() {
+	local out="" d
+	for d in $*; do
+		[ -n "$d" ] || continue
+		if [ -z "$out" ]; then out="\"$d\""; else out="$out, \"$d\""; fi
+	done
+	echo "$out"
+}
+
+_chain_name() {
+	echo "$1" | tr -c 'A-Za-z0-9_' '_'
+}
+
+_delete_table() {
+	$PROG delete table inet "$TABLE" >/dev/null 2>&1
+}
+
+
+_write_diag() {
+	local lan_devs="$1" wan_devs="$2" do_ipv6="$3" f="/tmp/nftttl_diag.log"
+	{
+		echo "=== nftttl diag $(date '+%Y-%m-%d %H:%M:%S') ==="
+		echo "LAN_DEVS=[$lan_devs]"
+		echo "WAN_DEVS=[$wan_devs]"
+		echo "IPv6_RULES=$do_ipv6"
+		echo "--- IPv6 route ---"
+		ip -6 route 2>/dev/null || true
+		echo "--- IPv6 addr global ---"
+		ip -6 addr show scope global 2>/dev/null || true
+		echo "--- bridge links ---"
+		bridge link 2>/dev/null || true
+		echo "--- br-lan ports ---"
+		ls -1 /sys/class/net/br-lan/brif 2>/dev/null || true
+		echo "--- odhcpd lan config ---"
+		uci -q show dhcp.lan 2>/dev/null || true
+		echo "--- network lan config ---"
+		uci -q show network.lan 2>/dev/null || true
+	} > "$f"
+}
+
+_apply_client_ipv6_assist() {
+	# Compatibility helper for wired LAN clients that show "Network is unreachable" for IPv6.
+	# This does not touch nft rules. It only makes OpenWrt advertise IPv6 on LAN using
+	# a broad SLAAC-compatible profile and restarts odhcpd when values changed.
+	local changed=0 flags
+
+	[ "$(_uci_get network.lan.ip6assign)" = "60" ] || { uci -q set network.lan.ip6assign='60'; changed=1; }
+	[ "$(_uci_get dhcp.lan.ra)" = "server" ] || { uci -q set dhcp.lan.ra='server'; changed=1; }
+	[ "$(_uci_get dhcp.lan.dhcpv6)" = "server" ] || { uci -q set dhcp.lan.dhcpv6='server'; changed=1; }
+	[ "$(_uci_get dhcp.lan.ra_slaac)" = "1" ] || { uci -q set dhcp.lan.ra_slaac='1'; changed=1; }
+	[ "$(_uci_get dhcp.lan.ra_default)" = "1" ] || { uci -q set dhcp.lan.ra_default='1'; changed=1; }
+
+	# Best compatibility: do not force the managed-config flag for clients that prefer SLAAC.
+	# Keep other-config so clients may still learn DNS/options where supported.
+	flags="$(uci -q get dhcp.lan.ra_flags 2>/dev/null)"
+	case " $flags " in
+		*" managed-config "*)
+			uci -q delete dhcp.lan.ra_flags 2>/dev/null
+			uci -q add_list dhcp.lan.ra_flags='other-config'
+			changed=1
+		;;
+		"")
+			uci -q add_list dhcp.lan.ra_flags='other-config'
+			changed=1
+		;;
+	esac
+
+	if [ "$changed" = "1" ]; then
+		uci -q commit network
+		uci -q commit dhcp
+		/etc/init.d/odhcpd restart >/dev/null 2>&1 || true
+		_log_action "IPv6 client assist applied: LAN RA/SLAAC/default-route compatibility profile refreshed"
+	fi
+}
+
+_build_rules() {
+	local value="$1" in_value="$2" lan_devs="$3" wan_devs="$4" use_ingress="$5" do_ipv4="$6" do_ipv6="$7" normalize_input="$8" normalize_lan_output="$9"
+	local lan_elems wan_elems dev cname idx=0 existing_lan
+	lan_elems="$(_ifname_elems $lan_devs)"
+	wan_elems="$(_ifname_elems $wan_devs)"
+	existing_lan="$(_filter_existing_devs $lan_devs)"
+
+	{
+		echo "add table inet $TABLE"
+		[ -n "$lan_elems" ] && echo "add set inet $TABLE lanif { type ifname; elements = { $lan_elems }; }"
+		[ -n "$wan_elems" ] && echo "add set inet $TABLE wanif { type ifname; elements = { $wan_elems }; }"
+
+		# Optional aggressive mode. Disabled by default because some OpenWrt boots create br-lan late.
+		# IPv6 is protected: do not rewrite RA/ND/DHCPv6/control ICMPv6 packets.
+		if [ "$use_ingress" = "1" ]; then
+			for dev in $existing_lan; do
+				idx=$((idx + 1))
+				cname="ttl_ingress_lan_${idx}_$(_chain_name "$dev")"
+				echo "add chain inet $TABLE $cname { type filter hook ingress device \"$dev\" priority -400; policy accept; }"
+				[ "$do_ipv4" = "1" ] && echo "add rule inet $TABLE $cname meta nfproto ipv4 ip ttl set $in_value counter"
+				if [ "$do_ipv6" = "1" ]; then
+					echo "add rule inet $TABLE $cname meta nfproto ipv6 meta l4proto != ipv6-icmp ip6 hoplimit set $in_value counter"
+					echo "add rule inet $TABLE $cname meta nfproto ipv6 meta l4proto ipv6-icmp icmpv6 type { echo-request, echo-reply } ip6 hoplimit set $in_value counter"
+				fi
+			done
+
+			echo "add chain inet $TABLE ttl_forward { type filter hook forward priority mangle; policy accept; }"
+			if [ -n "$lan_elems" ]; then
+				[ "$do_ipv4" = "1" ] && echo "add rule inet $TABLE ttl_forward iifname @lanif meta nfproto ipv4 ip ttl set $in_value counter"
+				if [ "$do_ipv6" = "1" ]; then
+					# Smooth IPv6: skip DHCPv6/link-local/multicast and ICMPv6 control.
+					echo "add rule inet $TABLE ttl_forward iifname @lanif meta nfproto ipv6 meta l4proto tcp ip6 hoplimit set $in_value counter"
+					echo "add rule inet $TABLE ttl_forward iifname @lanif meta nfproto ipv6 meta l4proto udp ip6 saddr != fe80::/10 ip6 daddr != fe80::/10 ip6 daddr != ff00::/8 udp sport != { 546, 547 } udp dport != { 546, 547 } ip6 hoplimit set $in_value counter"
+					echo "add rule inet $TABLE ttl_forward iifname @lanif meta nfproto ipv6 meta l4proto ipv6-icmp icmpv6 type { echo-request, echo-reply } ip6 hoplimit set $in_value counter"
+				fi
+			fi
+		fi
+
+		# Optional WAN input normalize: makes router ping output show solid ttl=64/hlim=64.
+		# IPv6 is restricted to ICMPv6 echo-reply only, so WAN RA/ND/control packets keep HopLimit 255.
+		if [ "$normalize_input" = "1" ]; then
+			echo "add chain inet $TABLE ttl_prerouting_wan { type filter hook prerouting priority mangle; policy accept; }"
+			if [ -n "$wan_elems" ]; then
+				[ "$do_ipv4" = "1" ] && echo "add rule inet $TABLE ttl_prerouting_wan iifname @wanif meta nfproto ipv4 ip ttl set $value counter"
+				[ "$do_ipv6" = "1" ] && echo "add rule inet $TABLE ttl_prerouting_wan iifname @wanif meta nfproto ipv6 meta l4proto ipv6-icmp icmpv6 type echo-reply ip6 hoplimit set $value counter"
+			fi
+		fi
+
+		# LAN output normalize: makes PC/phone clients behind router also see solid ttl=64/hlim=64.
+		# IPv6 is restricted to ICMPv6 echo-reply only. Never rewrite RA/ND/DHCPv6/control packets to LAN.
+		if [ "$normalize_lan_output" = "1" ]; then
+			echo "add chain inet $TABLE ttl_postrouting_lan { type filter hook postrouting priority mangle; policy accept; }"
+			if [ -n "$lan_elems" ]; then
+				[ "$do_ipv4" = "1" ] && echo "add rule inet $TABLE ttl_postrouting_lan oifname @lanif meta nfproto ipv4 ip ttl set $value counter"
+				[ "$do_ipv6" = "1" ] && echo "add rule inet $TABLE ttl_postrouting_lan oifname @lanif meta nfproto ipv6 meta l4proto ipv6-icmp icmpv6 type echo-reply ip6 hoplimit set $value counter"
+			fi
+		fi
+
+		# Safe default: clamp packets leaving detected WAN/WAN6 interfaces.
+		# IPv6 flow-safe mode clamps TCP/normal UDP/echo only, so DHCPv6/RA/ND/control remains valid after IPv6 re-enable.
+		echo "add chain inet $TABLE ttl_postrouting_wan { type filter hook postrouting priority mangle; policy accept; }"
+		if [ -n "$wan_elems" ]; then
+			[ "$do_ipv4" = "1" ] && echo "add rule inet $TABLE ttl_postrouting_wan oifname @wanif meta nfproto ipv4 ip ttl set $value counter"
+			if [ "$do_ipv6" = "1" ]; then
+				# IPv6 flow-safe WAN clamp. Do not touch DHCPv6, link-local, multicast, RA/ND or other ICMPv6 control packets.
+				echo "add rule inet $TABLE ttl_postrouting_wan oifname @wanif meta nfproto ipv6 meta l4proto tcp ip6 hoplimit set $value counter"
+				echo "add rule inet $TABLE ttl_postrouting_wan oifname @wanif meta nfproto ipv6 meta l4proto udp ip6 saddr != fe80::/10 ip6 daddr != fe80::/10 ip6 daddr != ff00::/8 udp sport != { 546, 547 } udp dport != { 546, 547 } ip6 hoplimit set $value counter"
+				echo "add rule inet $TABLE ttl_postrouting_wan oifname @wanif meta nfproto ipv6 meta l4proto ipv6-icmp icmpv6 type { echo-request, echo-reply } ip6 hoplimit set $value counter"
+			fi
+		fi
+	} > "$TMP_FILE"
+}
+
+service_triggers() {
+	procd_add_reload_trigger "nftttl"
+	procd_add_reload_trigger "firewall"
+	procd_add_reload_trigger "network"
+}
+
+start_service() {
+	local enable value in_value plus persist use_ingress ipv4 ipv6 normalize_input normalize_lan_output ipv6_lan_diag client_ipv6_assist ipv6_flow_safe do_ipv4 do_ipv6
+	local lan_devs wan_devs cfg_lan cfg_wan
+
+	mkdir -p "$PERSIST_DIR" /tmp
+	[ -x "$PROG" ] || { _log_action "ERROR: nft binary not found at $PROG"; return 1; }
+
+	enable="$(_cfg_enabled)"
+	value="$(_cfg_value)"
+	plus="$(_cfg_ingress_plus_one)"; [ -n "$plus" ] || plus=1
+	persist="$(_cfg_persist_file)"; [ -n "$persist" ] || persist=0
+	use_ingress="$(_cfg_use_ingress)"; [ -n "$use_ingress" ] || use_ingress=0
+	ipv4="$(_cfg_ipv4)"; [ -n "$ipv4" ] || ipv4=1
+	ipv6="$(_cfg_ipv6)"; [ -n "$ipv6" ] || ipv6=auto
+	normalize_input="$(_cfg_normalize_input)"; [ -n "$normalize_input" ] || normalize_input=1
+	normalize_lan_output="$(_cfg_normalize_lan_output)"; [ -n "$normalize_lan_output" ] || normalize_lan_output=1
+	ipv6_lan_diag="$(_cfg_ipv6_lan_diag)"; [ -n "$ipv6_lan_diag" ] || ipv6_lan_diag=1
+	client_ipv6_assist="$(_cfg_client_ipv6_assist)"; [ -n "$client_ipv6_assist" ] || client_ipv6_assist=1
+	ipv6_flow_safe="$(_cfg_ipv6_flow_safe)"; [ -n "$ipv6_flow_safe" ] || ipv6_flow_safe=1
+
+	case "$value" in *[!0-9]*|"") value=64;; esac
+	[ "$value" -lt 1 ] 2>/dev/null && value=64
+	[ "$value" -gt 255 ] 2>/dev/null && value=255
+
+	in_value="$value"
+	[ "$plus" = "1" ] && in_value=$((value + 1))
+	[ "$in_value" -gt 255 ] && in_value=255
+
+	if [ "$client_ipv6_assist" = "1" ]; then
+		_apply_client_ipv6_assist
+	fi
+
+	if [ "$enable" != "1" ]; then
+		_log_action "TTL disabled: deleting nft table inet $TABLE"
+		_delete_table
+		rm -f "$TMP_FILE" "$PERSIST_FILE"
+		return 0
+	fi
+
+	cfg_lan="$(_cfg_lan_ifaces)"
+	cfg_wan="$(_cfg_wan_ifaces)"
+	case " $cfg_lan " in
+		*" auto "*|" ") lan_devs="$(_auto_lan_devs) $(_strip_auto_words $cfg_lan)" ;;
+		*) lan_devs="$cfg_lan" ;;
+	esac
+	case " $cfg_wan " in
+		*" auto "*|" ") wan_devs="$(_auto_wan_devs) $(_strip_auto_words $cfg_wan)" ;;
+		*) wan_devs="$cfg_wan" ;;
+	esac
+	lan_devs="$(_dedupe_words $lan_devs)"
+	wan_devs="$(_dedupe_words $wan_devs)"
+
+	do_ipv4=0; [ "$ipv4" = "1" ] && do_ipv4=1
+	do_ipv6=0
+	case "$ipv6" in
+		1|on|force) do_ipv6=1 ;;
+		auto) _ipv6_ready && do_ipv6=1 || do_ipv6=0 ;;
+		*) do_ipv6=0 ;;
+	esac
+
+	_build_rules "$value" "$in_value" "$lan_devs" "$wan_devs" "$use_ingress" "$do_ipv4" "$do_ipv6" "$normalize_input" "$normalize_lan_output"
+	[ "$ipv6_lan_diag" = "1" ] && _write_diag "$lan_devs" "$wan_devs" "$do_ipv6"
+	_delete_table
+
+	if $PROG -f "$TMP_FILE" >/tmp/nftttl_apply.log 2>&1; then
+		[ "$persist" = "1" ] && cp "$TMP_FILE" "$PERSIST_FILE" 2>/dev/null
+		[ -z "$wan_devs" ] && _log_action "TTL waiting: WAN/WAN6 device not ready yet; loaded empty egress chain only"
+		[ "$ipv6" = "auto" ] && [ "$do_ipv6" = "0" ] && _log_action "IPv6 HopLimit skipped: no IPv6 default route/global address yet"
+		_log_action "TTL applied: IPv4=$do_ipv4 TTL=$value IPv6=$do_ipv6 HopLimit=$value LAN=[$lan_devs] WAN=[$wan_devs] ingress=$use_ingress normalize_input=$normalize_input normalize_lan_output=$normalize_lan_output client_ipv6_assist=$client_ipv6_assist ipv6_flow_safe=$ipv6_flow_safe diag=/tmp/nftttl_diag.log"
+		return 0
+	fi
+
+	_log_action "ERROR: failed to load nft rules. See /tmp/nftttl_apply.log"
+	cat /tmp/nftttl_apply.log >> /tmp/ttl_action.log 2>/dev/null
+	return 1
+}
+
+stop_service() {
+	_log_action "Stopping TTL changer: deleting nft table inet $TABLE"
+	_delete_table
+}
+
+reload_service() {
+	start_service
+}
+
+restart() {
+	stop
+	start
+}
