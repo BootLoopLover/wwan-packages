@@ -1,0 +1,102 @@
+<%+header%>
+<%-
+    local message = message or ""
+    local success = success or false
+-%>
+
+<style>
+.card {
+    background: rgba(0, 0, 0, 0.4); /* 40% opacity */
+    padding: 20px;
+    border-radius: 12px;
+    color: #fff;
+    width: 390px;
+    margin: auto;
+    text-align: center;
+}
+button, input {
+    margin-top: 10px;
+    width: 100%;
+    padding: 12px;
+    border-radius: 8px;
+    border: none;
+    font-size: 15px;
+}
+button {
+    cursor: pointer;
+    background: #3b82f6;
+    color: white;
+    font-weight: bold;
+}
+button:hover {
+    background: #2563eb;
+}
+input[type="text"], input[type="file"] {
+    background: #2b2b2b;
+    color: #fff;
+    border: 1px solid #444;
+}
+.msg {
+    margin-top: 15px;
+    padding: 10px;
+    border-radius: 5px;
+    font-weight: bold;
+}
+.ok {background:#065f46;}
+.err{background:#7f1d1d;}
+</style>
+
+<div class="card">
+    <h2>🎨 Custom Background</h2>
+    <p>Theme Alpha</p>
+
+    <% if message and #message > 1 then %>
+        <div class="msg <%= success and 'ok' or 'err' %>">
+            <%= message %>
+        </div>
+    <% end %>
+
+    <hr style="opacity:.2;margin:15px 0;">
+
+    <!-- UPLOAD FILE -->
+    <form method="post" enctype="multipart/form-data">
+        <label><b>📁 Upload Local Image</b></label>
+        <input type="file" name="file" accept=".png,.jpg,.jpeg,.webp" required />
+        <button type="submit" name="upload">Upload</button>
+    </form>
+
+    <hr style="opacity:.2;margin:15px 0;">
+
+    <!-- APPLY FROM URL -->
+    <form method="post">
+        <label><b>🌍 Import image URL</b></label>
+        <input type="text" name="image_url" placeholder=" https://....jpg" />
+        <button type="submit" name="apply_url">Apply From URL</button>
+    </form>
+
+    <hr style="opacity:.2;margin:15px 0;">
+
+    <!-- RANDOM WALLPAPER -->
+    <form method="post">
+        <button style="background:#22c55e;" type="submit" name="randomize">
+            🎲 Random Wallpaper(wallhaven)
+        </button>
+    </form>
+</div>
+
+    <h3>Preview Current Background</h3>
+<style>
+#previewImg { 
+   opacity:0; 
+   transition:opacity .5s;
+}
+</style>
+
+<img id="previewImg" style="max-width:250px;border:2px solid #ccc;">
+<script>
+let img = document.getElementById("previewImg");
+img.src = "/luci-static/alpha/background/dashboard.png?t=" + Date.now();
+img.onload = () => img.style.opacity = 1;
+</script>
+<%+footer%>
+
