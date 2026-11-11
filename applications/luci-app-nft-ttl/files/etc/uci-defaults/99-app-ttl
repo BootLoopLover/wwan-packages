@@ -1,0 +1,30 @@
+#!/bin/sh
+# luci-app-nft-ttl defaults: create required dirs and apply stable TTL64 config.
+
+mkdir -p /etc/nftables.d /tmp
+chmod +x /etc/init.d/nft-custom-ttl /etc/hotplug.d/iface/95-nftttl 2>/dev/null
+
+uci -q batch <<'EOC'
+set nftttl.ttl=ttl
+set nftttl.ttl.enabled='1'
+set nftttl.ttl.value='64'
+set nftttl.ttl.ipv4='1'
+set nftttl.ttl.ipv6='auto'
+set nftttl.ttl.use_ingress='0'
+set nftttl.ttl.normalize_input='1'
+set nftttl.ttl.normalize_lan_output='1'
+set nftttl.ttl.client_ipv6_assist='1'
+set nftttl.ttl.ipv6_flow_safe='1'
+set nftttl.ttl.wan_ifaces='auto'
+set nftttl.ttl.lan_ifaces='auto'
+set nftttl.ttl.lan_extra_ifaces='lan1 lan2 lan3 lan4 wan'
+set nftttl.ttl.ingress_plus_one='1'
+set nftttl.ttl.ipv6_lan_diag='1'
+set nftttl.ttl.persist_file='0'
+commit nftttl
+EOC
+
+/etc/init.d/nft-custom-ttl enable >/dev/null 2>&1
+/etc/init.d/nft-custom-ttl restart >/dev/null 2>&1
+/etc/init.d/odhcpd restart >/dev/null 2>&1
+exit 0

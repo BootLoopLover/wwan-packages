@@ -1,0 +1,33 @@
+# Changelog
+
+## v2.1-fixed10
+- Smooth IPv6 disable/enable and WAN6 renew flow.
+- Added debounced hotplug reload to avoid rebuilding nft rules while WAN6/default-route is half-ready.
+- IPv6 WAN clamp now skips DHCPv6, link-local, multicast, RA/ND and other ICMPv6 control traffic.
+- IPv6 data clamp targets TCP, normal UDP and ICMPv6 echo request/reply only.
+- Added LuCI option: Smooth IPv6 re-enable flow.
+- Keeps v2.0 compact dropdown selectors and all TTL64 behavior for router, WiFi and LAN clients.
+
+## v2.0-fixed9
+- Changed LAN interfaces, Extra wired LAN interfaces, and WAN/WAN6 interfaces from always-visible checkbox lists to compact DynamicList dropdown selectors.
+- Keeps support for multiple selected interfaces using UCI list values.
+- Keeps all v1.8/v1.9 TTL64 fixes: router TTL64, WiFi/LAN client TTL64, IPv6-safe RA/ND/DHCPv6 handling, WAN auto-detect, LAN bridge member detection, and wired IPv6 assist.
+
+v1.9-fixed8-dropdown-interface-selector
+- Changed LuCI LAN interfaces, Extra wired LAN interfaces and WAN/WAN6 interfaces from free-text fields to MultiValue tick selectors.
+- Selectors include Auto plus detected /sys/class/net devices and common OpenWrt ports such as br-lan, lan1-lan4, wan, wwan0_1, usb0, ppp0 and pppoe-wan.
+- Init script now reads both normal UCI option values and LuCI MultiValue list values.
+- If Auto is ticked together with specific interfaces, Auto detection is kept and the explicit interfaces are appended safely; the literal word auto is never written into nft ifname sets.
+- Keeps v1.8 fixed7 TTL64 behavior for router, WiFi, LAN, IPv4 and IPv6-safe client output.
+
+v1.8-fixed7-wired-client-ipv6-assist
+- Added IPv6 wired client assist: RA/SLAAC/default route compatibility profile.
+- Keeps TTL64 safe rules from v1.7.
+- Helps wired clients that have no IPv6 default route while WiFi works.
+
+v1.7-fixed6-wired-lan-ipv6-ttl64
+- Added bridge member LAN detection for wired ports (lan1/lan2/eth*) when WiFi works but wired LAN does not hit TTL/HopLimit normalize rules.
+- Added optional lan_extra_ifaces UCI/LuCI field.
+- Kept IPv6-safe behavior: LAN HopLimit rewrite only touches ICMPv6 echo-reply, not RA/ND/DHCPv6/control packets.
+- Added /tmp/nftttl_diag.log with IPv6 route/address, bridge port and odhcpd/network LAN diagnostics.
+- Kept WAN postrouting bypass and WAN prerouting router ping solid TTL64 mode.
