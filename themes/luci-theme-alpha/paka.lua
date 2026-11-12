@@ -1,7 +1,7 @@
-module("luci.controller.radu", package.seeall)
+module("luci.controller.paka", package.seeall)
 
 function index()
-    entry({"admin", "tools", "radu"}, call("action_page"), _("Custom Background"), 99)
+    entry({"admin", "tools", "paka"}, call("action_page"), _("Custom Background"), 99)
 end
 
 function action_page()
@@ -18,7 +18,7 @@ function action_page()
 
     -- === UPLOAD LOCAL FILE ===
     if http.formvalue("upload") then
-        local tmp_file = "/tmp/radu_upload"
+        local tmp_file = "/tmp/paka_upload"
         local out = io.open(tmp_file, "wb")
 
         if out then
@@ -64,7 +64,7 @@ function action_page()
 
     -- === RANDOM WALLPAPER USING WALLHAVEN API ===
     if http.formvalue("randomize") then
-        local api_tmp = "/tmp/radu_api.json"
+        local api_tmp = "/tmp/paka_api.json"
         os.execute('curl -s -A "Mozilla" "https://wallhaven.cc/api/v1/search?sorting=random&purity=100&categories=110" -o ' .. api_tmp)
 
         local data = fs.readfile(api_tmp)
@@ -90,5 +90,5 @@ function action_page()
         end
     end
 
-    luci.template.render("radu", {success = success, message = message})
+    luci.template.render("paka", {success = success, message = message})
 end

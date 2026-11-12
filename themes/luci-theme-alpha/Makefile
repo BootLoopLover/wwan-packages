@@ -44,9 +44,9 @@ define Package/luci-theme-$(THEME_NAME)/install
 	$(INSTALL_DIR) $(1)/etc/config
 	$(CP) -a ./root/etc/config/* $(1)/etc/config/ 2>/dev/null || true
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller
-	$(CP) -a ./radu.lua $(1)/usr/lib/lua/luci/controller/radu.lua
+	$(CP) -a ./paka.lua $(1)/usr/lib/lua/luci/controller/paka.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/view
-	$(CP) -a ./radu.htm $(1)/usr/lib/lua/luci/view/radu.htm
+	$(CP) -a ./paka.htm $(1)/usr/lib/lua/luci/view/paka.htm
 endef
 
 define Package/luci-theme-$(THEME_NAME)/postinst
